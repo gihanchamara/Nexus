@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="003-strategy-create" author="nexus">
+        <comment>Strategy registry and associated ML model versions.</comment>
+
+        <!-- Strategy definitions -->
+        <createTable tableName="strategy">
+            <column name="id" type="INT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="name" type="VARCHAR(100)">
+                <constraints nullable="false" unique="true"/>
+            </column>
+            <!-- Python import path, e.g. nexus.strategy.strategies.mean_reversion.MeanReversionStrategy -->
+            <column name="class_path" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <!-- JSON: strategy-specific displayable parameters -->
+            <column name="parameters" type="JSON"/>
+            <column name="status" type="ENUM('ACTIVE','PAUSED','ARCHIVED')" defaultValue="PAUSED">
+                <constraints nullable="false"/>
+            </column>
+            <column name="version" type="VARCHAR(20)" defaultValue="0.1.0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="description" type="TEXT"/>
+            <column name="created_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <!-- ML/AI model versions linked to strategies -->
+        <createTable tableName="model_registry">
+            <column name="id" type="INT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="strategy_id" type="INT">
+                <constraints nullable="false" foreignKeyName="fk_model_strategy"
+                    references="strategy(id)"/>
+            </column>
+            <column name="model_name" type="VARCHAR(100)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="version" type="VARCHAR(30)">
+                <constraints nullable="false"/>
+            </column>
+            <!-- Path to serialized model artifact -->
+            <column name="artifact_path" type="VARCHAR(500)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="hyperparameters" type="JSON"/>
+            <!-- Sharpe, accuracy, etc. -->
+            <column name="eval_metrics" type="JSON"/>
+            <column name="status" type="ENUM('TRAINING','STAGING','PRODUCTION','RETIRED')" defaultValue="STAGING">
+                <constraints nullable="false"/>
+            </column>
+            <column name="trained_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <createIndex tableName="model_registry" indexName="idx_model_registry_strategy_status">
+            <column name="strategy_id"/>
+            <column name="status"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

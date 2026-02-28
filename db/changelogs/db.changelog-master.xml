@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <include file="changesets/001-symbols.xml"        relativeToChangelogFile="true"/>
+    <include file="changesets/002-credentials.xml"    relativeToChangelogFile="true"/>
+    <include file="changesets/003-strategy.xml"       relativeToChangelogFile="true"/>
+    <include file="changesets/004-trading-session.xml" relativeToChangelogFile="true"/>
+    <include file="changesets/005-orders.xml"         relativeToChangelogFile="true"/>
+    <include file="changesets/006-backtest.xml"        relativeToChangelogFile="true"/>
+    <include file="changesets/007-telemetry.xml"       relativeToChangelogFile="true"/>
+
+</databaseChangeLog>

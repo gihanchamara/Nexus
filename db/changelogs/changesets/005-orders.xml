@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="005-orders-create" author="nexus">
+        <comment>Orders, fills, and live positions. Mirrors ib_insync Trade/Fill/Position.</comment>
+
+        <!-- Orders (mirrors ib_insync Trade + Order) -->
+        <createTable tableName="order_event">
+            <column name="id" type="INT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="session_id" type="INT">
+                <constraints nullable="false" foreignKeyName="fk_order_session"
+                    references="trading_session(id)"/>
+            </column>
+            <column name="strategy_id" type="INT">
+                <constraints foreignKeyName="fk_order_strategy" references="strategy(id)"/>
+            </column>
+            <column name="symbol" type="VARCHAR(20)">
+                <constraints nullable="false" foreignKeyName="fk_order_symbol"
+                    references="symbol(symbol)"/>
+            </column>
+            <!-- IBKR-assigned order ID (null for paper/pre-submission) -->
+            <column name="ib_order_id" type="INT"/>
+            <column name="side" type="ENUM('BUY','SELL')">
+                <constraints nullable="false"/>
+            </column>
+            <column name="order_type" type="ENUM('MKT','LMT','STP','STP_LMT','TRAIL','BRACKET')">
+                <constraints nullable="false"/>
+            </column>
+            <column name="quantity" type="DECIMAL(18,4)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="limit_price" type="DECIMAL(18,4)"/>
+            <column name="stop_price" type="DECIMAL(18,4)"/>
+            <column name="time_in_force" type="ENUM('DAY','GTC','IOC','FOK')" defaultValue="DAY"/>
+            <column name="status" type="ENUM('PENDING','SUBMITTED','PARTIALLY_FILLED','FILLED','CANCELLED','REJECTED')" defaultValue="PENDING">
+                <constraints nullable="false"/>
+            </column>
+            <!-- Full IBKR order state JSON snapshot -->
+            <column name="ib_order_state" type="JSON"/>
+            <!-- Signal that triggered this order -->
+            <column name="signal_payload" type="JSON"/>
+            <column name="submitted_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <!-- Individual fill events (an order can have multiple partial fills) -->
+        <createTable tableName="fill">
+            <column name="id" type="INT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="order_id" type="INT">
+                <constraints nullable="false" foreignKeyName="fk_fill_order"
+                    references="order_event(id)"/>
+            </column>
+            <column name="fill_qty" type="DECIMAL(18,4)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="fill_price" type="DECIMAL(18,4)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="commission" type="DECIMAL(18,4)" defaultValueNumeric="0.0"/>
+            <column name="currency" type="VARCHAR(10)" defaultValue="USD"/>
+            <!-- PAPER or LIVE — so paper fills are never mixed with live PnL -->
+            <column name="execution_source" type="ENUM('PAPER','LIVE')">
+                <constraints nullable="false"/>
+            </column>
+            <column name="filled_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <!-- Current positions (net per session+symbol) -->
+        <createTable tableName="position">
+            <column name="id" type="INT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="session_id" type="INT">
+                <constraints nullable="false" foreignKeyName="fk_position_session"
+                    references="trading_session(id)"/>
+            </column>
+            <column name="symbol" type="VARCHAR(20)">
+                <constraints nullable="false" foreignKeyName="fk_position_symbol"
+                    references="symbol(symbol)"/>
+            </column>
+            <column name="quantity" type="DECIMAL(18,4)" defaultValueNumeric="0.0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="avg_cost" type="DECIMAL(18,4)" defaultValueNumeric="0.0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="unrealized_pnl" type="DECIMAL(18,4)" defaultValueNumeric="0.0"/>
+            <column name="realized_pnl" type="DECIMAL(18,4)" defaultValueNumeric="0.0"/>
+            <column name="updated_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <addUniqueConstraint
+            tableName="position"
+            columnNames="session_id, symbol"
+            constraintName="uq_position_session_symbol"/>
+
+        <createIndex tableName="order_event" indexName="idx_order_session_symbol">
+            <column name="session_id"/>
+            <column name="symbol"/>
+        </createIndex>
+
+        <createIndex tableName="order_event" indexName="idx_order_status">
+            <column name="status"/>
+        </createIndex>
+
+        <createIndex tableName="fill" indexName="idx_fill_order_filled_at">
+            <column name="order_id"/>
+            <column name="filled_at"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>

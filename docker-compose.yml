@@ -1,0 +1,99 @@
+version: "3.9"
+
+services:
+
+  # ─── Relational DB (orders, positions, strategy config, audit) ──────────────
+  mysql:
+    image: mysql:8.0
+    container_name: nexus_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: nexus
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db/mysql/conf.d:/etc/mysql/conf.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER}", "-p${MYSQL_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus_net
+
+  # ─── Time-Series DB (OHLCV bars, tick data) ─────────────────────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: nexus_timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nexus_ts
+      POSTGRES_USER: ${TIMESCALE_USER}
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./db/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TIMESCALE_USER} -d nexus_ts"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus_net
+
+  # ─── Event Bus (Redis Streams) ───────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nexus_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus_net
+
+  # ─── Liquibase DB migrations (runs once and exits) ──────────────────────────
+  liquibase:
+    image: liquibase/liquibase:4.27
+    container_name: nexus_liquibase
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./db/changelogs:/liquibase/changelog
+    command: >
+      --url=jdbc:mysql://mysql:3306/nexus?useSSL=false&allowPublicKeyRetrieval=true
+      --username=${MYSQL_USER}
+      --password=${MYSQL_PASSWORD}
+      --changeLogFile=db.changelog-master.xml
+      update
+    networks:
+      - nexus_net
+
+volumes:
+  mysql_data:
+  timescale_data:
+  redis_data:
+
+networks:
+  nexus_net:
+    driver: bridge

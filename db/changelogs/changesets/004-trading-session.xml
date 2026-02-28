@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.27.xsd">
+
+    <changeSet id="004-trading-session-create" author="nexus">
+        <comment>
+            A trading session groups all orders, fills, and positions
+            under a single run (PAPER or LIVE). Makes backtest vs live
+            vs paper clearly separated at the data layer.
+        </comment>
+
+        <createTable tableName="trading_session">
+            <column name="id" type="INT" autoIncrement="true">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="mode" type="ENUM('PAPER','LIVE','BACKTEST')">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ibkr_account" type="VARCHAR(20)"/>
+            <column name="initial_capital" type="DECIMAL(18,4)" defaultValueNumeric="0.0">
+                <constraints nullable="false"/>
+            </column>
+            <!-- Snapshot of active strategy configs at session start -->
+            <column name="config_snapshot" type="JSON"/>
+            <column name="started_at" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ended_at" type="DATETIME"/>
+            <column name="notes" type="TEXT"/>
+        </createTable>
+
+        <createIndex tableName="trading_session" indexName="idx_session_mode_started">
+            <column name="mode"/>
+            <column name="started_at"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>
