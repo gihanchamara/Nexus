@@ -55,6 +55,7 @@ _STRATEGY_CHANNELS = [
     "market.news",
     "market.options_chain",
     "strategy.param_update",
+    "strategy.activation",   # Phase 4: AI StrategySelector directives
 ]
 
 
@@ -204,32 +205,51 @@ class StrategyRegistry:
                 params = json.loads(params_str)
                 self.update_params(strategy_id, params)
 
+            elif channel == "strategy.activation":
+                # Phase 4: AI StrategySelector activation directives
+                activate = json.loads(raw.get("activate", "[]"))
+                deactivate = json.loads(raw.get("deactivate", "[]"))
+                for sid in activate:
+                    self.activate_strategy(sid)
+                for sid in deactivate:
+                    self.deactivate_strategy(sid)
+                if activate or deactivate:
+                    logger.info(
+                        "[Registry] AI activation: activate=%s deactivate=%s "
+                        "rationale=%s",
+                        activate, deactivate, raw.get("rationale", ""),
+                    )
+
         except Exception as exc:
             logger.debug("Dispatch error on %s: %s", channel, exc)
 
     # ─── Per-handler routing ─────────────────────────────────────────────────
 
+    def _active_strategies(self) -> list:
+        """Return only strategies that are currently active (not paused by AI)."""
+        return [s for s in self._strategies.values() if s._active]
+
     async def _route_bar(self, bar: BarData) -> None:
-        tasks = [s.on_bar(bar) for s in self._strategies.values()]
+        tasks = [s.on_bar(bar) for s in self._active_strategies()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _route_tick(self, tick: TickData) -> None:
-        tasks = [s.on_tick(tick) for s in self._strategies.values()]
+        tasks = [s.on_tick(tick) for s in self._active_strategies()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _route_news(self, news: NewsEvent) -> None:
-        tasks = [s.on_news(news) for s in self._strategies.values()]
+        tasks = [s.on_news(news) for s in self._active_strategies()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _route_options_chain(self, chain: OptionsChainSnapshot) -> None:
-        tasks = [s.on_options_chain(chain) for s in self._strategies.values()]
+        tasks = [s.on_options_chain(chain) for s in self._active_strategies()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    # ─── Hot-reload ───────────────────────────────────────────────────────────
+    # ─── Hot-reload + AI activation ──────────────────────────────────────────
 
     def update_params(self, strategy_id: str, params: dict[str, Any]) -> None:
         strategy = self._strategies.get(strategy_id)
@@ -237,6 +257,24 @@ class StrategyRegistry:
             strategy.update_params(params)
         else:
             logger.warning("param_update for unknown strategy_id: %s", strategy_id)
+
+    def activate_strategy(self, strategy_id: str) -> None:
+        """Resume a paused strategy (Phase 4: called by AI StrategySelector)."""
+        strategy = self._strategies.get(strategy_id)
+        if strategy:
+            strategy._active = True
+            logger.info("[Registry] Strategy activated by AI: %s", strategy_id)
+        else:
+            logger.debug("activate_strategy: unknown id %s", strategy_id)
+
+    def deactivate_strategy(self, strategy_id: str) -> None:
+        """Pause a strategy without removing it (Phase 4: called by AI StrategySelector)."""
+        strategy = self._strategies.get(strategy_id)
+        if strategy:
+            strategy._active = False
+            logger.info("[Registry] Strategy deactivated by AI: %s", strategy_id)
+        else:
+            logger.debug("deactivate_strategy: unknown id %s", strategy_id)
 
     # ─── Introspection ───────────────────────────────────────────────────────
 

@@ -57,6 +57,8 @@ class SignalRouter:
         paper_engine: PaperEngine,
         sizing_method: str = "fixed_pct",
         sizing_params: dict[str, Any] | None = None,
+        source_channel: str = "strategy.signal",   # Phase 4: set to "ai.signal" when ensemble is active
+        use_sentiment: bool = False,               # Phase 4: apply sentiment confidence modifier
     ) -> None:
         self._risk = risk_manager
         self._paper = paper_engine
@@ -64,6 +66,8 @@ class SignalRouter:
         self._sizer = PositionSizer()
         self._sizing_method = sizing_method
         self._sizing_params = sizing_params or {}
+        self._source_channel = source_channel
+        self._use_sentiment = use_sentiment
 
         self._consumer = EventConsumer()
         self._running = False
@@ -75,10 +79,14 @@ class SignalRouter:
     async def start(self) -> None:
         await self._consumer.connect()
         # Create consumer group so signals are processed exactly once
-        await self._consumer.ensure_group("strategy.signal", "oms-router")
+        group = "oms-router"
+        await self._consumer.ensure_group(self._source_channel, group)
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="oms-router")
-        logger.info("SignalRouter started (mode=%s)", get_settings().nexus_trading_mode)
+        logger.info(
+            "SignalRouter started (mode=%s, source=%s, sentiment=%s)",
+            get_settings().nexus_trading_mode, self._source_channel, self._use_sentiment,
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -90,11 +98,11 @@ class SignalRouter:
 
     async def _loop(self) -> None:
         async for msg_id, raw in self._consumer.read_group(
-            "strategy.signal", "oms-router", "router-worker-1"
+            self._source_channel, "oms-router", "router-worker-1"
         ):
             try:
                 await self._process(raw)
-                await self._consumer.ack("strategy.signal", "oms-router", msg_id)
+                await self._consumer.ack(self._source_channel, "oms-router", msg_id)
                 self._processed += 1
             except asyncio.CancelledError:
                 break
@@ -124,6 +132,18 @@ class SignalRouter:
         # ── HOLD signals are no-ops ───────────────────────────────────────────
         if signal.direction == Direction.HOLD:
             return
+
+        # ── Phase 4: Sentiment confidence modifier ────────────────────────────
+        if self._use_sentiment:
+            try:
+                from nexus.ai.sentiment import sentiment_analyzer
+                multiplier = sentiment_analyzer.confidence_multiplier(
+                    signal.symbol, signal.direction.value
+                )
+                signal.confidence = min(1.0, signal.confidence * multiplier)
+                logger.debug("[Router] Sentiment modifier %.2f → conf=%.2f", multiplier, signal.confidence)
+            except Exception:
+                pass  # sentiment failures never block order flow
 
         # ── Kill switch (fast path — no risk manager overhead) ────────────────
         if settings.nexus_kill_switch:
@@ -264,4 +284,6 @@ class SignalRouter:
             ),
             "sizing_method": self._sizing_method,
             "mode": get_settings().nexus_trading_mode,
+            "source_channel": self._source_channel,
+            "sentiment_enabled": self._use_sentiment,
         }

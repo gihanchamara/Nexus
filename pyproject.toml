@@ -53,8 +53,17 @@ dependencies = [
 
 [project.optional-dependencies]
 ml = [
+    # LLM Sentiment
+    "anthropic>=0.28.0",        # Claude claude-haiku-4-5 for news sentiment analysis
+    # Regime Detection
+    "hmmlearn>=0.3.2",          # Gaussian HMM for market regime clustering
+    "xgboost>=2.0.3",           # XGBoost regime classifier (semi-supervised)
+    # Signal Ensemble + Portfolio Optimisation
+    "scikit-learn>=1.5.0",      # stacking ensemble, cross-validation
+    "cvxpy>=1.5.0",             # convex optimisation (mean-variance portfolio)
+    # Deep Learning (optional — for LSTM sequence models in Phase 5)
     "torch>=2.3.0",
-    "scikit-learn>=1.5.0",
+    # Legacy
     "langchain>=0.2.0",
     "openai>=1.30.0",
 ]
