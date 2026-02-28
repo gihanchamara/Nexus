@@ -1,0 +1,685 @@
+%%{init: {"theme": "dark", "flowchart": {"curve": "basis", "nodeSpacing": 40, "rankSpacing": 60}}}%%
+flowchart TB
+
+    %% ═══════════════════════════════════════════════════════════════════════
+    %% NEXUS — AI-FIRST QUANT TRADING PLATFORM
+    %% High-Level Component Design  |  v0.2  |  Options-aware
+    %% ═══════════════════════════════════════════════════════════════════════
+
+    %% ── EXTERNAL DATA SOURCES ───────────────────────────────────────────────
+    subgraph EXT["  External Data Sources"]
+        direction LR
+        IBKR_GW["IBKR TWS / IB Gateway
+        ──────────────────────
+        Live ticks · OHLCV bars · L2
+        Options chains · Greeks (Δ Γ Θ ν ρ)
+        Account data · Orders · Positions
+        port 7497 paper | 7496 live"]
+
+        NEWS_API["News & Sentiment APIs
+        ──────────────────────
+        Benzinga · Reuters · Polygon
+        Twitter/X · Reddit (wsb, stocks)
+        SEC EDGAR filings"]
+
+        ALT_DATA["Alternative Data
+        ──────────────────────
+        Options flow · Dark pool prints
+        Institutional 13F positions
+        Earnings whisper numbers
+        Put/Call ratio feeds"]
+
+        MACRO_SRC["Macro & Calendar
+        ──────────────────────
+        Fed decisions · CPI · NFP
+        Earnings calendar
+        Ex-dividend dates
+        VIX term structure"]
+    end
+
+    %% ── DATA INGESTION ──────────────────────────────────────────────────────
+    subgraph INGEST["  Data Ingestion Layer"]
+        direction LR
+        MKT_ING["Market Data Ingester
+        ──────────────────────
+        ib_insync: reqMktData + reqRealTimeBars
+        Normalises → TickData / BarData schema
+        Max 100 simultaneous subscriptions (paper)
+        Publishes → market.tick | market.bar.*"]
+
+        OPT_ING["Options Chain Ingester
+        ──────────────────────
+        Full chain: ALL strikes × ALL expiries
+        ib_insync: reqSecDefOptParams + chains
+        Greeks per contract (real-time)
+        IV per strike → surface data points
+        Publishes → market.options_chain"]
+
+        NEWS_ING["News & Sentiment Ingester
+        ──────────────────────
+        Pulls headlines + full body
+        Symbol tagging + deduplication
+        Scheduled + webhook triggers
+        Publishes → market.news"]
+
+        HIST["Historical Data Manager
+        ──────────────────────
+        On-demand OHLCV + options history
+        Rate-throttled: 60 req / 10 min (IBKR)
+        Caches to TimescaleDB on first pull
+        Writes directly → TimescaleDB"]
+    end
+
+    %% ── EVENT BUS ───────────────────────────────────────────────────────────
+    subgraph BUS["⚡  Event Bus  ·  Redis Streams  ·  Every component publishes here with timestamp + component_id + mode"]
+        direction LR
+        BUS_MKT["market.tick
+        market.bar.5s | .1m | .5m | .1h | .1d
+        market.options_chain
+        market.news | market.halt"]
+
+        BUS_SIG["strategy.signal
+        strategy.state
+        strategy.param_update"]
+
+        BUS_ORD["order.submitted
+        order.filled
+        order.partial_fill
+        order.cancelled | order.rejected"]
+
+        BUS_SYS["risk.breach | risk.greeks
+        risk.killswitch
+        system.heartbeat | system.error
+        telemetry.*"]
+    end
+
+    %% ── AI ENGINE ───────────────────────────────────────────────────────────
+    subgraph AI["🤖  AI / Analytics Engine  ·  Platform differentiator — AI drives strategy selection, not just signals"]
+
+        subgraph AI_MARKET["Market Intelligence"]
+            REGIME["Market Regime Detector
+            ──────────────────────
+            Outputs: BULL | BEAR | SIDEWAYS | HIGH_VOL | CRISIS
+            Method: HMM · Gaussian Mixture · XGBoost classifier
+            Features: returns, vol, breadth, VIX term structure
+            Updates: every bar | Confidence: 0–1
+            ⚡ Drives: which strategy family to activate"]
+
+            IV_SURF["IV Surface Modeler
+            ──────────────────────
+            Builds full implied vol surface per symbol
+            Term structure: contango vs backwardation
+            Vol skew: put skew / call skew / smile
+            Parametrisation: SVI / SABR
+            Snapshots stored → TimescaleDB
+            Updates: on each options chain pull"]
+
+            IV_RANK["IV Rank & Percentile Engine
+            ──────────────────────
+            IVR = (IV_now - IV_52wLow) / (IV_52wHigh - IV_52wLow)
+            IVP = percentile of IV_now in 1Y distribution
+            ─────────────────────────────────────────
+            IVR > 50  →  favour SELLING options
+                          Iron Condor · CSP · Covered Call
+            IVR < 30  →  favour BUYING options
+                          Straddle · Long Call · Vertical Spread
+            ⚡ Key gate for options strategy selection"]
+
+            OPT_FLOW["Options Flow Analyzer
+            ──────────────────────
+            Unusual OI sweeps & large block trades
+            Put/Call OI ratio trends per symbol
+            Dark pool print pattern matching
+            Whale position tracking (size + strike)
+            Smart money signal score: 0–1
+            Feeds → Feature Store"]
+        end
+
+        subgraph AI_SIG["Signal Generation"]
+            SENT["Sentiment Analyzer  (LLM-based)
+            ──────────────────────
+            LLM (Claude API) on news headline + body
+            Outputs: score -1.0 (bearish) → +1.0 (bullish)
+            Earnings call tone · CEO commentary
+            Macro policy tone · Analyst upgrade/downgrade
+            Symbol-level + macro-level scores"]
+
+            FEAT["Feature Store
+            ──────────────────────
+            Technical: RSI · MACD · BB · ATR · MFI · VWAP
+            Options:   IVR · IVP · skew · term slope · OI change
+            Macro:     yield curve · VIX · sector rotation score
+            Sentiment: news score · social score · flow score
+            All features: timestamped + versioned
+            Computed async, cached in Redis"]
+
+            SIG_GEN["Signal Generator
+            ──────────────────────
+            Ensemble: XGBoost + LSTM + linear model
+            Output: Signal { direction, confidence 0–1, symbol }
+            Per-symbol · Per-timeframe (1m, 1h, 1d)
+            Model versioned in Model Registry
+            ─────────────────────────────────
+            confidence > 0.7  →  full size position
+            confidence 0.5–0.7 →  half size
+            confidence < 0.5  →  no trade"]
+        end
+
+        subgraph AI_META["Meta-AI Layer  ·  AI decides WHAT to trade, not just direction"]
+            STRAT_SEL["Strategy Selector AI
+            ──────────────────────
+            Inputs:  Regime + IVR + Greeks exposure + P&L
+            Output:  { strategy_id, params, capital_pct }
+            ─────────────────────────────────────────────
+            Regime=SIDEWAYS + IVR>50  →  Iron Condor
+            Regime=BULL    + IVR<30   →  Bull Call Spread
+            Regime=BULL    + IVR>50   →  Covered Call
+            Regime=ANY     + catalyst →  Straddle (pre-event)
+            Regime=BEAR    + IVR<30   →  Long Put / Bear Spread
+            Regime=HIGH_VOL           →  reduce all positions
+            ─────────────────────────────────────────────
+            ⚡ This is the AI-first platform differentiator"]
+
+            PORT_OPT["Portfolio Optimizer
+            ──────────────────────
+            Multi-strategy capital allocation
+            Objective: Max Sharpe / Risk Parity / Min Greeks
+            Correlation-aware across equity + options legs
+            Target: configurable portfolio delta neutrality
+            Rebalances: on regime change or daily"]
+        end
+    end
+
+    %% ── STRATEGY ENGINE ─────────────────────────────────────────────────────
+    subgraph STRAT["♟  Strategy Engine  ·  Modular · DB-backed config · Each strategy exposes displayable parameters"]
+
+        STRAT_REG["Strategy Registry
+        ──────────────────────
+        All strategy configs stored in MySQL
+        Parameters: hot-reloadable at runtime
+        Displayable: all params visible in UI
+        Status: ACTIVE | PAUSED | ARCHIVED
+        Versioned · Audit-logged on change"]
+
+        subgraph EQ_S["Equity Strategies"]
+            direction LR
+            EQ1["Momentum / Trend
+            MA crossover
+            Breakout systems
+            Volume-confirmed"]
+            EQ2["Mean Reversion
+            Bollinger band
+            RSI extremes
+            Z-score thresholds"]
+            EQ3["Statistical Arb
+            Pairs / cointegration
+            Sector rotation
+            ETF arbitrage"]
+        end
+
+        subgraph OPT_S["Options Strategies  ←  activated by Strategy Selector AI based on Regime + IVR"]
+            direction TB
+
+            subgraph INC["Income Strategies  (High IVR · Range-bound)"]
+                direction LR
+                O_CC["Covered Call
+                ────────────────
+                Own 100 shares
+                Sell OTM call
+                Income: premium
+                Caps upside"]
+                O_CSP["Cash-Secured Put
+                ────────────────
+                Sell OTM put
+                Hold cash collateral
+                Income: premium
+                Target: buy stock"]
+                O_WHL["Wheel Strategy
+                ────────────────
+                CSP → assigned
+                → Covered Call
+                → repeat cycle
+                Steady income"]
+                O_IC["Iron Condor
+                ────────────────
+                Sell OTM call sprd
+                Sell OTM put sprd
+                4 legs total
+                Profit: range-bound"]
+                O_IBF["Iron Butterfly
+                ────────────────
+                Sell ATM straddle
+                Buy OTM wings
+                Higher premium
+                Tighter profit zone"]
+            end
+
+            subgraph DIR["Directional  (Low–Med IVR · Trending)"]
+                direction LR
+                O_LC["Long Call / Put
+                ────────────────
+                Defined-risk
+                Directional bet
+                Pre-catalyst plays
+                Low IVR entry"]
+                O_VS["Vertical Spreads
+                ────────────────
+                Bull Call Spread
+                Bear Put Spread
+                Reduced cost
+                Defined risk + reward"]
+                O_LEAPS["LEAPS
+                ────────────────
+                >1 year expiry
+                Equity replacement
+                Lower capital
+                Delta ~0.7 ITM"]
+            end
+
+            subgraph VOL["Volatility Plays  (Catalyst expected · Low IVR)"]
+                direction LR
+                O_STR["Long Straddle
+                ────────────────
+                ATM call + ATM put
+                Big move either way
+                Best: pre-earnings
+                Theta decay risk"]
+                O_STRG["Long Strangle
+                ────────────────
+                OTM call + OTM put
+                Cheaper straddle
+                Needs larger move
+                Lower cost entry"]
+                O_RATIO["Ratio Spread
+                ────────────────
+                Buy 1 · Sell 2 OTM
+                Credit or small debit
+                Moderate move profit
+                Undefined upside risk"]
+            end
+
+            subgraph TIME["Time Decay / Structure  (Range-bound · Roll)"]
+                direction LR
+                O_CAL["Calendar Spread
+                ────────────────
+                Sell near-term
+                Buy far-term
+                Same strike
+                Vol term structure"]
+                O_DIAG["Diagonal Spread
+                ────────────────
+                Sell near OTM
+                Buy far ITM
+                Poor man's CC
+                Lower capital req"]
+                O_BUT["Butterfly
+                ────────────────
+                Buy low + high strike
+                Sell 2x mid strike
+                Pin risk play
+                Max profit at mid"]
+            end
+        end
+
+        EXPIRY["Expiry Manager
+        ──────────────────────
+        Monitors ALL open options positions daily
+        Assignment risk: flag ITM positions near expiry
+        Auto-roll: close expiring leg + open next month
+        0DTE hard exit: close before market close
+        Pin risk alerts: ±0.5% of short strike at close
+        Earnings blackout: auto-pause before events"]
+
+        PORT_MGR["Portfolio Manager
+        ──────────────────────
+        Multi-strategy capital allocation
+        Enforces: max concurrent positions per strategy
+        Conflict detection: opposing positions same symbol
+        Rebalancing triggers from Portfolio Optimizer"]
+
+    end
+
+    %% ── RISK MANAGEMENT ─────────────────────────────────────────────────────
+    subgraph RISK["🛡  Risk Management  ·  Every signal passes through here before reaching OMS"]
+
+        GREEKS_MON["Greeks Monitor
+        ──────────────────────
+        Real-time per-position: Δ Γ Θ ν ρ
+        Portfolio-level aggregated Greeks
+        Delta drift alerts (threshold: ±5% portfolio)
+        Gamma exposure spike near expiry
+        Vega P&L sensitivity (1% IV move impact)
+        Theta: expected daily time decay income"]
+
+        DELTA_H["Delta Hedger  (optional mode)
+        ──────────────────────
+        Auto-hedges net portfolio delta
+        Instrument: stock shares or ATM options
+        Triggers: delta breach beyond band (e.g. ±0.10)
+        Goal: delta-neutral or delta-target portfolio
+        Configurable: ON | OFF | TARGET_DELTA"]
+
+        PORT_GLIM["Portfolio Greeks Limits
+        ──────────────────────
+        Max net portfolio delta (configurable)
+        Max vega exposure (IV sensitivity limit)
+        Target theta range (income strategy target)
+        Max gamma risk (near expiry tightening)
+        Breach → block new orders in that direction"]
+
+        POS_LIM["Position Limits
+        ──────────────────────
+        Max size per symbol (% of portfolio)
+        Max open contracts per expiry date
+        Max legs per multi-leg order (safety)
+        Max buying power per trade
+        Sector concentration limits"]
+
+        DD_MON["Drawdown Monitor
+        ──────────────────────
+        Max portfolio drawdown (hard stop %)
+        Daily loss limit (resets at market open)
+        Strategy-level P&L limits (per strategy)
+        Consecutive loss counter (cool-down trigger)
+        Breach → auto-pause affected strategies"]
+
+        KILL["Kill Switch
+        ──────────────────────
+        NEXUS_KILL_SWITCH=1 (env var)
+        Instantly blocks ALL new order submission
+        Optional: flatten all open positions
+        PAPER mode is always inherently safe
+        LIVE mode: requires admin + activation token"]
+
+    end
+
+    %% ── ORDER MANAGEMENT SYSTEM ────────────────────────────────────────────
+    subgraph OMS["📋  Order Management System  ·  Paper default · Live requires explicit activation"]
+
+        SIG_ROUTE["Signal Router
+        ──────────────────────
+        Receives: Signal { symbol, direction, confidence }
+        Checks: Kill switch → Risk limits → Mode gate
+        Routes: PAPER engine or LIVE broker
+        Emits: order.submitted event on bus"]
+
+        POS_SIZE["Position Sizer
+        ──────────────────────
+        Fixed % of portfolio (simple)
+        Kelly Criterion (volatility-adjusted)
+        ATR-based: stop distance → position size
+        Options: max premium % of portfolio value
+        Confidence-weighted: size ∝ signal confidence
+        Respects buying power + margin requirements"]
+
+        ORD_BUILD["Order Builder
+        ──────────────────────
+        Single-leg: stock · call · put
+        Multi-leg: IBKR BAG combo orders
+          Iron Condor  = 4 legs (sell c-sprd + p-sprd)
+          Straddle     = 2 legs (call + put ATM)
+          Calendar     = 2 legs (near sell + far buy)
+          Butterfly    = 3 legs (low + high + 2x mid)
+        Bracket: entry + stop + target in one order
+        Options: ALWAYS use limit orders (never MKT)"]
+
+        PAPER_ENG["Paper Engine
+        ──────────────────────
+        Simulates fills using live bid/ask quotes
+        Options: fills at mid-price (bid+ask)/2
+        Equity: fills at last or VWAP
+        Commission model: IBKR rate schedule
+        Slippage model: spread × volatility factor
+        Emits IDENTICAL events to live — zero code diff"]
+
+        LIVE_EXEC["Live Broker  (IBKR)
+        ──────────────────────
+        ib_insync: placeOrder()
+        BAG orders for multi-leg options combos
+        Guard: Kill switch checked on every order
+        Guard: LIVE mode requires admin auth token
+        Guard: order size vs buying power check
+        Confirmation required for large orders"]
+
+    end
+
+    %% ── BACKTESTING ENGINE ──────────────────────────────────────────────────
+    subgraph BT["🔬  Backtesting Engine  ·  Same strategy code as live — no separate backtest logic"]
+
+        BT_REPLAY["Historical Replay
+        ──────────────────────
+        Event-driven: replays bar-by-bar
+        Same strategy ABC as live — zero duplication
+        Supports: equity bars + options chain history
+        Modes: VECTORIZED (fast) | EVENT_DRIVEN (accurate)
+        Loads data from: TimescaleDB / CSV / Parquet"]
+
+        OPT_PRICE["Options Pricer (Backtest)
+        ──────────────────────
+        European options: Black-Scholes
+        American options: Binomial tree
+        Historical IV surface replay (from snapshots)
+        Greeks computed per bar from historical IV
+        Validates: strategy P&L attribution by Greek"]
+
+        BT_FILL["Fill Simulator
+        ──────────────────────
+        Equity:  VWAP | next-bar open | mid-price
+        Options: historical bid-ask mid
+        Slippage: spread × volatility scaling factor
+        Commission: IBKR rate schedule (per contract)
+        Partial fills modelled for low-liquidity options"]
+
+        BT_PERF["Performance Analytics
+        ──────────────────────
+        Equity curve · Daily / Monthly P&L
+        Sharpe · Sortino · Calmar ratios
+        Max drawdown + recovery time + depth
+        Win rate · Profit factor · Avg hold time
+        Greeks P&L attribution: Δ-PnL | ν-PnL | Θ-PnL
+        Per-strategy + portfolio-level reports"]
+
+        WFO["Walk-Forward Optimizer
+        ──────────────────────
+        Prevents in-sample parameter overfitting
+        Rolling train / validation / test windows
+        Parameter stability analysis across windows
+        Regime-conditional parameter sets
+        Output: parameter confidence ranges + OOS report"]
+
+    end
+
+    %% ── PERSISTENCE ─────────────────────────────────────────────────────────
+    subgraph PERSIST["💾  Persistence Layer"]
+        direction LR
+        MYSQL_DB[("MySQL 8
+        ─────────────
+        Orders · Fills · Positions
+        Strategy config + params
+        Trading sessions · Audit log
+        Backtest run history
+        Credentials (encrypted)
+        Schema: Liquibase-managed")]
+
+        TSDB_DB[("TimescaleDB
+        ─────────────
+        OHLCV bars (all freqs)
+        Tick data (compressed)
+        IV surface snapshots
+        Options chain history
+        Continuous aggregates
+        Auto-compression: 7d")]
+
+        MODEL_STORE[("Model Registry
+        ─────────────
+        ML artifacts (pkl / pt)
+        Model versions + lineage
+        Hyperparameters
+        Eval metrics: Sharpe etc
+        Status: STAGING / PROD
+        Linked to backtest runs")]
+    end
+
+    %% ── OBSERVABILITY ───────────────────────────────────────────────────────
+    subgraph OBS["👁  Observability & UI  ·  UI is a passive consumer — push only, no polling"]
+
+        TEL_AGG["Telemetry Aggregator
+        ──────────────────────
+        Subscribes: ALL event bus channels
+        In-memory ring buffer: 200 events/component
+        WebSocket fan-out → Dashboard (push only)
+        Component health: last-seen + level tracking
+        Persists: WARN/ERROR events → MySQL"]
+
+        DASH["Dashboard
+        ──────────────────────
+        Real-time P&L · Open positions
+        Greeks panel: Δ Γ Θ ν per position + total
+        Options chain viewer (vol surface heatmap)
+        Order blotter · Fill history
+        Strategy params (display + live edit)
+        Component health tiles · Telemetry feed
+        Backtest results viewer"]
+
+        ALERT["Alert Engine
+        ──────────────────────
+        Risk limit breach
+        Greeks threshold exceeded
+        Expiry approaching  (T-1, T-0)
+        Signal fired (high confidence)
+        Model drift detected
+        Kill switch triggered
+        Delivery: UI toast · Email · Slack webhook"]
+
+    end
+
+    %% ═══════════════════════════════════════════════════════════════════════
+    %% DATA FLOW CONNECTIONS
+    %% ═══════════════════════════════════════════════════════════════════════
+
+    %% External → Ingestion
+    IBKR_GW  --> MKT_ING
+    IBKR_GW  --> OPT_ING
+    IBKR_GW  --> HIST
+    NEWS_API --> NEWS_ING
+    ALT_DATA --> NEWS_ING
+    ALT_DATA --> OPT_FLOW
+    MACRO_SRC --> NEWS_ING
+
+    %% Ingestion → Event Bus
+    MKT_ING  --> BUS_MKT
+    OPT_ING  --> BUS_MKT
+    NEWS_ING --> BUS_MKT
+
+    %% Ingestion → Persist (direct write for bulk data)
+    HIST     --> TSDB_DB
+    MKT_ING  --> TSDB_DB
+    OPT_ING  --> TSDB_DB
+
+    %% Bus → AI Engine
+    BUS_MKT  --> REGIME
+    BUS_MKT  --> IV_SURF
+    BUS_MKT  --> FEAT
+    BUS_MKT  --> SENT
+
+    %% AI internal
+    IV_SURF  --> IV_RANK
+    IV_RANK  --> STRAT_SEL
+    REGIME   --> STRAT_SEL
+    OPT_FLOW --> FEAT
+    SENT     --> FEAT
+    FEAT     --> SIG_GEN
+    SIG_GEN  --> BUS_SIG
+    STRAT_SEL --> STRAT_REG
+    PORT_OPT --> PORT_MGR
+
+    %% AI → Persist
+    SIG_GEN  --> MODEL_STORE
+
+    %% Bus → Strategy
+    BUS_MKT  --> STRAT_REG
+    BUS_SIG  --> STRAT_REG
+
+    %% Strategy → Bus
+    STRAT_REG --> BUS_SIG
+    EXPIRY    --> BUS_SIG
+    PORT_MGR  --> BUS_SIG
+
+    %% Bus → Risk
+    BUS_SIG --> GREEKS_MON
+    BUS_SIG --> POS_LIM
+    BUS_ORD --> GREEKS_MON
+    BUS_ORD --> DD_MON
+
+    %% Risk internal
+    GREEKS_MON --> PORT_GLIM
+    GREEKS_MON --> DELTA_H
+
+    %% Risk → OMS
+    PORT_GLIM --> SIG_ROUTE
+    POS_LIM   --> SIG_ROUTE
+    DD_MON    --> SIG_ROUTE
+    KILL      --> SIG_ROUTE
+    DELTA_H   --> SIG_ROUTE
+
+    %% OMS flow
+    SIG_ROUTE  --> POS_SIZE
+    POS_SIZE   --> ORD_BUILD
+    ORD_BUILD  --> PAPER_ENG
+    ORD_BUILD  --> LIVE_EXEC
+
+    %% OMS → Bus
+    PAPER_ENG  --> BUS_ORD
+    LIVE_EXEC  --> BUS_ORD
+
+    %% Backtest flow (reads history, uses same strategy + risk code)
+    TSDB_DB    --> BT_REPLAY
+    BT_REPLAY  --> OPT_PRICE
+    OPT_PRICE  --> BT_FILL
+    BT_FILL    --> BT_PERF
+    BT_PERF    --> WFO
+    WFO        --> MODEL_STORE
+    BT_PERF    --> MYSQL_DB
+
+    %% Persistence writes
+    BUS_ORD --> MYSQL_DB
+    BUS_SIG --> MYSQL_DB
+
+    %% Observability
+    BUS_SYS --> TEL_AGG
+    BUS_ORD --> TEL_AGG
+    BUS_SIG --> TEL_AGG
+    TEL_AGG --> DASH
+    TEL_AGG --> ALERT
+    ALERT   --> BUS_SYS
+
+    %% ═══════════════════════════════════════════════════════════════════════
+    %% NODE STYLES
+    %% ═══════════════════════════════════════════════════════════════════════
+
+    classDef ext     fill:#1F2937,stroke:#6B7280,color:#E5E7EB,font-size:12px
+    classDef ingest  fill:#0C2340,stroke:#60A5FA,color:#BFDBFE,font-size:12px
+    classDef bus     fill:#431407,stroke:#FB923C,color:#FFEDD5,font-size:12px
+    classDef ai      fill:#2E1065,stroke:#C084FC,color:#EDE9FE,font-size:12px
+    classDef strat   fill:#052E16,stroke:#4ADE80,color:#DCFCE7,font-size:12px
+    classDef risk    fill:#450A0A,stroke:#F87171,color:#FEE2E2,font-size:12px
+    classDef oms     fill:#0C4A6E,stroke:#38BDF8,color:#E0F2FE,font-size:12px
+    classDef bt      fill:#1C1917,stroke:#A8A29E,color:#F5F5F4,font-size:12px
+    classDef persist fill:#1E1B4B,stroke:#818CF8,color:#E0E7FF,font-size:12px
+    classDef obs     fill:#042F2E,stroke:#2DD4BF,color:#CCFBF1,font-size:12px
+
+    class IBKR_GW,NEWS_API,ALT_DATA,MACRO_SRC ext
+    class MKT_ING,OPT_ING,NEWS_ING,HIST ingest
+    class BUS_MKT,BUS_SIG,BUS_ORD,BUS_SYS bus
+    class REGIME,IV_SURF,IV_RANK,OPT_FLOW,SENT,FEAT,SIG_GEN,STRAT_SEL,PORT_OPT ai
+    class STRAT_REG,EQ1,EQ2,EQ3 strat
+    class O_CC,O_CSP,O_WHL,O_IC,O_IBF strat
+    class O_LC,O_VS,O_LEAPS strat
+    class O_STR,O_STRG,O_RATIO strat
+    class O_CAL,O_DIAG,O_BUT strat
+    class EXPIRY,PORT_MGR strat
+    class GREEKS_MON,DELTA_H,PORT_GLIM,POS_LIM,DD_MON,KILL risk
+    class SIG_ROUTE,POS_SIZE,ORD_BUILD,PAPER_ENG,LIVE_EXEC oms
+    class BT_REPLAY,OPT_PRICE,BT_FILL,BT_PERF,WFO bt
+    class MYSQL_DB,TSDB_DB,MODEL_STORE persist
+    class TEL_AGG,DASH,ALERT obs
