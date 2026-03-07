@@ -61,3 +61,11 @@ def test_docker_compose_ps(mock_ssh):
     from mcp.ssh_server.tools.docker import docker_compose_ps
     result = docker_compose_ps(mock_ssh, working_dir="/opt/nexus")
     assert "nexus" in result["stdout"]
+
+
+def test_tail_log(mock_ssh):
+    mock_ssh.execute.return_value = {"stdout": "line1\nline2\n", "stderr": "", "exit_code": 0}
+    from mcp.ssh_server.tools.logs import tail_log
+    result = tail_log(mock_ssh, "/var/log/nexus/app.log", lines=50)
+    mock_ssh.execute.assert_called_once_with("tail -n 50 /var/log/nexus/app.log")
+    assert "line1" in result["stdout"]
