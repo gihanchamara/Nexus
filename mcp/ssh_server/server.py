@@ -44,10 +44,21 @@ if _env_path.exists():
 configure_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = get_logger(__name__)
 
-# Module-level singletons — shared across all tool calls in the session
-_config = SSHConfig()
-_ssh = SSHClient(_config)
-log.info("nexus_ssh_mcp_starting", host=_config.host, user=_config.user)
+# Lazy singletons — initialized on first tool call so the server starts even
+# without SSH_HOST set (allows Claude Code to load the MCP server before .env is configured).
+_ssh: SSHClient | None = None
+
+
+def _get_ssh() -> SSHClient:
+    global _ssh
+    if _ssh is None:
+        config = SSHConfig()
+        _ssh = SSHClient(config)
+        log.info("nexus_ssh_mcp_ready", host=config.host, user=config.user)
+    return _ssh
+
+
+log.info("nexus_ssh_mcp_starting")
 
 mcp = FastMCP(
     name="nexus-ssh",
@@ -71,7 +82,7 @@ def run_command(command: str) -> dict:
     Returns:
         stdout, stderr, and exit_code (0 = success).
     """
-    return execute_command(_ssh, command)
+    return execute_command(_get_ssh(), command)
 
 
 @mcp.tool()
@@ -82,7 +93,7 @@ def upload(local_path: str, remote_path: str) -> dict:
         local_path: Absolute path on this machine (e.g. '/Users/me/nexus/.env').
         remote_path: Absolute path on the remote server (e.g. '/opt/nexus/.env').
     """
-    return upload_file(_ssh, local_path, remote_path)
+    return upload_file(_get_ssh(), local_path, remote_path)
 
 
 @mcp.tool()
@@ -93,7 +104,7 @@ def download(remote_path: str, local_path: str) -> dict:
         remote_path: Absolute path on the remote server.
         local_path: Where to save locally (absolute path).
     """
-    return download_file(_ssh, remote_path, local_path)
+    return download_file(_get_ssh(), remote_path, local_path)
 
 
 @mcp.tool()
@@ -104,19 +115,19 @@ def compose_up(working_dir: str = "/opt/nexus", detach: bool = True) -> dict:
         working_dir: Directory containing docker-compose.yml on the remote server.
         detach: Run in background (True) or foreground (False).
     """
-    return docker_compose_up(_ssh, working_dir, detach)
+    return docker_compose_up(_get_ssh(), working_dir, detach)
 
 
 @mcp.tool()
 def compose_down(working_dir: str = "/opt/nexus") -> dict:
     """Stop and remove the Nexus Docker Compose stack."""
-    return docker_compose_down(_ssh, working_dir)
+    return docker_compose_down(_get_ssh(), working_dir)
 
 
 @mcp.tool()
 def compose_ps(working_dir: str = "/opt/nexus") -> dict:
     """List all containers in the Nexus Docker Compose stack with their status."""
-    return docker_compose_ps(_ssh, working_dir)
+    return docker_compose_ps(_get_ssh(), working_dir)
 
 
 @mcp.tool()
@@ -127,7 +138,7 @@ def read_log(remote_path: str, lines: int = 100) -> dict:
         remote_path: Absolute path to the log file on the remote server.
         lines: Number of lines to return (default 100).
     """
-    return tail_log(_ssh, remote_path, lines)
+    return tail_log(_get_ssh(), remote_path, lines)
 
 
 if __name__ == "__main__":
