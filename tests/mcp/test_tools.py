@@ -37,3 +37,27 @@ def test_upload_file_returns_error_on_exception(mock_ssh):
     result = upload_file(mock_ssh, "/local/missing.txt", "/remote/x.txt")
     assert result["success"] is False
     assert "file not found" in result["error"]
+
+
+def test_docker_compose_up(mock_ssh):
+    from mcp.ssh_server.tools.docker import docker_compose_up
+    result = docker_compose_up(mock_ssh, working_dir="/opt/nexus")
+    mock_ssh.execute.assert_called_once_with(
+        "cd /opt/nexus && docker compose up -d"
+    )
+    assert result["exit_code"] == 0
+
+
+def test_docker_compose_down(mock_ssh):
+    from mcp.ssh_server.tools.docker import docker_compose_down
+    result = docker_compose_down(mock_ssh, working_dir="/opt/nexus")
+    mock_ssh.execute.assert_called_once_with(
+        "cd /opt/nexus && docker compose down"
+    )
+
+
+def test_docker_compose_ps(mock_ssh):
+    mock_ssh.execute.return_value = {"stdout": "NAME   STATUS\nnexus  Up\n", "stderr": "", "exit_code": 0}
+    from mcp.ssh_server.tools.docker import docker_compose_ps
+    result = docker_compose_ps(mock_ssh, working_dir="/opt/nexus")
+    assert "nexus" in result["stdout"]
