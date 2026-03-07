@@ -27,7 +27,8 @@ def test_connect_uses_keychain_password(mock_ssh_cls, mock_keyring, mock_config)
 
     mock_keyring.get_password.assert_called_once_with("nexus-ssh", "nexus-deploy")
     mock_ssh.connect.assert_called_once_with(
-        "10.0.0.1", port=22, username="ubuntu", password="secret123", timeout=10
+        "10.0.0.1", port=22, username="ubuntu", password="secret123", timeout=10,
+        allow_agent=False, look_for_keys=False,
     )
 
 

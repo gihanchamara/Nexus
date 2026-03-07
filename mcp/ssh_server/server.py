@@ -41,7 +41,11 @@ if _env_path.exists():
     load_dotenv(_env_path)
 
 # Configure logging before creating any objects
-configure_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
+# SSH_LOG_DIR: directory for daily-rotating ssh_mcp.log (unset → stdout only)
+configure_logging(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    log_dir=os.environ.get("SSH_LOG_DIR"),
+)
 log = get_logger(__name__)
 
 # Lazy singletons — initialized on first tool call so the server starts even
