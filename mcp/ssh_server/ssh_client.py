@@ -78,24 +78,66 @@ class SSHClient:
 
     # ── Shell ─────────────────────────────────────────────────────────────
 
+    def _sudo_password(self) -> str:
+        """Retrieve sudo password from Keychain.
+
+        Looks up service='nexus-ssh-sudo', username=<SSH user> first.
+        Falls back to the SSH login password if no sudo-specific entry exists.
+        """
+        sudo_pwd = keyring.get_password("nexus-ssh-sudo", self._config.user)
+        if sudo_pwd is not None:
+            return sudo_pwd
+        # Fall back to SSH login password (common on personal servers)
+        ssh_pwd = keyring.get_password(
+            self._config.keychain_service, self._config.keychain_username
+        )
+        if ssh_pwd is None:
+            raise RuntimeError("No sudo or SSH password found in Keychain")
+        return ssh_pwd
+
     def execute(self, command: str) -> dict[str, Any]:
         """Run a shell command. Logs command, exit_code, and truncated output."""
         log.info("ssh_command", command=command)
-        client = self._ensure_connected()
-        _, stdout, stderr = client.exec_command(command)
-        exit_code = stdout.channel.recv_exit_status()
-        stdout_text = stdout.read().decode("utf-8", errors="replace")
-        stderr_text = stderr.read().decode("utf-8", errors="replace")
-
+        result = self._run_command(command)
         log.info(
             "ssh_command_result",
             command=command,
-            exit_code=exit_code,
-            stdout_preview=stdout_text[:200],
-            stderr_preview=stderr_text[:200],
-            success=(exit_code == 0),
+            exit_code=result["exit_code"],
+            stdout_preview=result["stdout"][:200],
+            stderr_preview=result["stderr"][:200],
+            success=(result["exit_code"] == 0),
         )
-        return {"stdout": stdout_text, "stderr": stderr_text, "exit_code": exit_code}
+        return result
+
+    def execute_sudo(self, command: str) -> dict[str, Any]:
+        """Run a command with sudo, piping password via stdin (-S flag).
+
+        Password is retrieved from Keychain (service='nexus-ssh-sudo', username=<SSH user>).
+        Falls back to the SSH login password if no dedicated sudo entry exists.
+        """
+        sudo_pwd = self._sudo_password()
+        # -S reads password from stdin; -p '' suppresses the prompt string
+        wrapped = f"echo {sudo_pwd!r} | sudo -S -p '' {command}"
+        log.info("ssh_sudo_command", command=command)
+        result = self._run_command(wrapped)
+        log.info(
+            "ssh_sudo_result",
+            command=command,
+            exit_code=result["exit_code"],
+            success=(result["exit_code"] == 0),
+        )
+        return result
+
+    def _run_command(self, command: str) -> dict[str, Any]:
+        """Internal: execute a raw command string and return output dict."""
+        client = self._ensure_connected()
+        _, stdout, stderr = client.exec_command(command)
+        exit_code = stdout.channel.recv_exit_status()
+        return {
+            "stdout": stdout.read().decode("utf-8", errors="replace"),
+            "stderr": stderr.read().decode("utf-8", errors="replace"),
+            "exit_code": exit_code,
+        }
 
     # ── SFTP ──────────────────────────────────────────────────────────────
 
