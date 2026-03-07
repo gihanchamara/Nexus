@@ -46,6 +46,8 @@ class SSHClient:
             username=self._config.user,
             password=password,
             timeout=10,
+            allow_agent=False,    # don't try SSH agent (password-only)
+            look_for_keys=False,  # don't scan ~/.ssh/* key files
         )
         self._client = client
         log.info(
