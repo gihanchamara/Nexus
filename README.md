@@ -3,6 +3,9 @@
 > An event-driven, modular, AI-first quantitative trading platform built on IBKR data feeds,
 > with full backtesting, paper/live trading, real-time observability, and a MySQL persistence layer
 > managed by Liquibase.
+>
+> **Status: Phases 1–4 complete.** Foundation → Strategy Core → Backtesting Engine → AI/ML Pipeline.
+> Phase 5 (Production / Live Trading) is next.
 
 ---
 
@@ -263,22 +266,34 @@ mindmap
   root((Event Bus\nRedis Streams))
     market
       market.tick
+      market.bar.5s
       market.bar.1m
       market.bar.5m
       market.bar.1d
+      market.options_chain
       market.news
       market.halt
     strategy
       strategy.signal
+      strategy.activation
       strategy.param_update
       strategy.state
+    ai
+      ai.features
+      ai.regime
+      ai.iv_rank
+      ai.sentiment
+      ai.signal
+      ai.allocation
     order
       order.submitted
       order.filled
+      order.partial_fill
       order.cancelled
       order.rejected
     risk
       risk.breach
+      risk.greeks
       risk.killswitch
     telemetry
       telemetry.ingestion
@@ -349,56 +364,161 @@ flowchart TD
 
 ## 6. Strategy & AI Engine
 
+### 6a. Strategy Engine
+
+| File | Class | Responsibility |
+|------|-------|----------------|
+| `nexus/strategy/base.py` | `BaseStrategy` | ABC: `on_bar`, `on_tick`, `on_news`, `on_options_chain`, `emit_signal`, hot-reload params |
+| `nexus/strategy/registry.py` | `StrategyRegistry` | Dynamic import, event routing, `strategy.activation` consumer, activate/deactivate guard |
+| `nexus/strategy/strategies/ma_crossover.py` | `MovingAverageCrossover` | Golden/death cross; confidence-scored signals |
+| `nexus/strategy/strategies/iron_condor.py` | `IronCondor` | IVR-gated 4-leg options strategy; profit target/stop management |
+
+```mermaid
+flowchart LR
+    subgraph Bus["Redis Streams"]
+        direction TB
+        MKTBAR["market.bar.*"]
+        MKTTICK["market.tick"]
+        MKTNEWS["market.news"]
+        MKTOPT["market.options_chain"]
+        SIGOUT["strategy.signal"]
+        ACTIV["strategy.activation"]
+    end
+
+    subgraph Registry["StrategyRegistry"]
+        ACTIVE{"_active == True?"}
+        ROUTE["Route to strategy"]
+    end
+
+    subgraph ABC["BaseStrategy (ABC)"]
+        ON_BAR["on_bar(bar)"]
+        ON_TICK["on_tick(tick)"]
+        ON_NEWS["on_news(news)"]
+        ON_OPT["on_options_chain(chain)"]
+        EMIT["emit_signal(signal)"]
+    end
+
+    MKTBAR --> Registry
+    MKTTICK --> Registry
+    MKTNEWS --> Registry
+    MKTOPT --> Registry
+    ACTIV --> Registry
+
+    Registry --> ACTIVE
+    ACTIVE -->|yes| ROUTE
+    ROUTE --> ABC
+
+    ON_BAR --> EMIT
+    ON_TICK --> EMIT
+    ON_NEWS --> EMIT
+    ON_OPT --> EMIT
+    EMIT --> SIGOUT
+```
+
+### 6b. AI / ML Pipeline (Phase 4)
+
+Seven components in `nexus/ai/`. All publish to `ai.*` channels on Redis Streams.
+
 ```mermaid
 flowchart TD
-    subgraph StrategyEngine["Strategy Engine"]
-        direction TB
-        REG["Strategy Registry\n(DB-persisted config)"]
-        LOADER["Strategy Loader\n(dynamic import)"]
-        RUNNER["Strategy Runner\n(asyncio per-strategy)"]
-        PARAM["Parameter Store\n(displayable, hot-reloadable)"]
+    subgraph Inputs["Bus Inputs"]
+        MB["market.bar.*"]
+        MO["market.options_chain"]
+        MN["market.news"]
+        SS["strategy.signal"]
     end
 
-    subgraph StrategyInterface["Strategy Interface (ABC)"]
-        INIT["on_init(params: dict)"]
-        BAR["on_bar(bar: BarData)"]
-        TICK2["on_tick(tick: TickData)"]
-        NEWS2["on_news(news: NewsEvent)"]
-        SIG2["emit_signal(signal: Signal)"]
+    subgraph Features["Feature Layer"]
+        FS["FeatureStore (features.py)
+        ─────────────────────
+        Ring-buffer rolling indicators
+        RSI · MACD · Bollinger · ATR
+        Rolling HV · Momentum · Volume
+        Publishes → ai.features"]
+
+        IVE["IVEngine (iv_engine.py)
+        ─────────────────────
+        ATM IV · IVR · IVP
+        Term slope · Put/call skew
+        Publishes → ai.iv_rank"]
     end
 
-    subgraph AIEngine["AI / ML Engine"]
-        FE2["Feature Engineering\n(technical indicators, NLP embeddings)"]
-        MODEL["Model Registry\n(versioned, DB-backed)"]
-        INFER["Inference Service\n(async, non-blocking)"]
-        TRAIN["Training Pipeline\n(offline / scheduled)"]
-        EVAL["Model Evaluator\n(Sharpe, accuracy, etc.)"]
+    subgraph Intelligence["Market Intelligence"]
+        RD["RegimeDetector (regime.py)
+        ─────────────────────
+        Rule-based (always active)
+        + GaussianHMM (hmmlearn)
+        + XGBoost classifier
+        States: BULL|BEAR|SIDEWAYS|HIGH_VOL|CRISIS
+        Publishes → ai.regime"]
+
+        SA["SentimentAnalyzer (sentiment.py)
+        ─────────────────────
+        Claude claude-haiku-4-5 LLM (primary)
+        Keyword fallback (no API key)
+        Rate-limited 1/min/symbol
+        confidence_multiplier() → 0.5–1.5
+        Publishes → ai.sentiment"]
     end
 
-    subgraph Signal["Signal Schema"]
-        SIGOBJ["Signal {
-  symbol: str
-  direction: BUY | SELL | HOLD
-  confidence: float 0..1
-  strategy_id: str
-  model_version: str
-  timestamp_utc: datetime
-  metadata: dict
-}"]
+    subgraph MetaAI["Meta-AI Layer"]
+        SEL["StrategySelector (strategy_selector.py)
+        ─────────────────────
+        Priority 1: CRISIS override
+        Priority 2: Greeks defensive guard
+        Priority 3: Regime × IVR matrix
+        Publishes → strategy.activation"]
+
+        ENS["SignalEnsemble (signal_ensemble.py)
+        ─────────────────────
+        Sharpe-weighted votes (5s window)
+        Conflict suppression
+        Reads: strategy.signal
+        Publishes → ai.signal"]
+
+        PO["PortfolioOptimizer (portfolio_optimizer.py)
+        ─────────────────────
+        Methods: Kelly | MV | risk-parity | equal
+        Max 50% concentration cap
+        Publishes → ai.allocation"]
     end
 
-    REG --> LOADER
-    LOADER --> RUNNER
-    PARAM --> RUNNER
-    RUNNER --> StrategyInterface
-    StrategyInterface --> FE2
-    FE2 --> INFER
-    MODEL --> INFER
-    INFER --> SIG2
-    SIG2 --> Signal
-    TRAIN --> MODEL
-    EVAL --> MODEL
+    subgraph Training["Offline Training"]
+        MT["ModelTrainer (trainer.py)
+        ─────────────────────
+        GaussianHMM fit (hmmlearn)
+        XGBoost semi-supervised
+        CPU work in run_in_executor
+        Saves → nexus/ai/models/"]
+    end
+
+    MB --> FS
+    MB --> RD
+    MO --> IVE
+    MN --> SA
+    SS --> ENS
+
+    FS --> RD
+    IVE --> SEL
+    RD --> SEL
+    SA --> ENS
+
+    SEL --> ACTIV_OUT["strategy.activation"]
+    ENS --> AISIG["ai.signal"]
+    PO --> AIALLOC["ai.allocation"]
+    MT --> MODELS[("regime_hmm.pkl\nregime_xgb.pkl")]
+    MODELS --> RD
 ```
+
+**Regime × IVR Decision Matrix:**
+
+| Regime | IVR < 30 | IVR 30–50 | IVR > 50 |
+|--------|----------|-----------|----------|
+| BULL_TREND | MA Crossover, Bull Spread | MA Crossover, CSP | Covered Call, CSP |
+| BEAR_TREND | Bear Spread, Long Put | Bear Spread, Protective Put | Bear Spread, Protective Put |
+| SIDEWAYS_CHOP | Iron Condor | Iron Condor, Strangle | Iron Condor, Strangle (primary) |
+| HIGH_VOL | Scale down all | Scale down all | Iron Condor, Short Strangle |
+| CRISIS | **CASH — all deactivated** | **CASH** | **CASH** |
 
 ---
 
@@ -470,63 +590,84 @@ flowchart TD
 
 ---
 
-## 8. Backtesting Engine
+## 8. Backtesting Engine (Phase 3)
+
+Six files in `nexus/backtest/`. Uses the **same strategy code as live** — zero duplication.
+
+| File | Class | Responsibility |
+|------|-------|----------------|
+| `engine.py` | `BacktestEngine` | Orchestrates replay; installs `BacktestPublisher` mock |
+| `data_loader.py` | `DataLoader` | CSV · Parquet · TimescaleDB loaders; multi-format column detection |
+| `options_pricer.py` | `HistoricalVolatility`, `IVSurface`, `PricerChainBuilder` | Synthetic IV surface from rolling HV; full `OptionsChainSnapshot` via Black-Scholes |
+| `fill_simulator.py` | `FillSimulator` | NEXT_BAR_OPEN · CLOSE · VWAP · MID_PRICE fill modes; IBKR commission model |
+| `analytics.py` | `PerformanceMetrics`, `compute_metrics()` | Sharpe · Sortino · Calmar · max drawdown · win rate · profit factor (pure numpy) |
+| `walk_forward.py` | `WalkForwardOptimizer` | Rolling 70/30 train/test; async parallel grid search; param stability via CV |
 
 ```mermaid
 flowchart TD
-    subgraph Config["Backtest Configuration"]
-        BCONF["BacktestConfig {
-  strategy_id: str
-  symbol_list: List[str]
-  start_date: date
-  end_date: date
-  initial_capital: float
-  commission_model: str
-  slippage_model: str
-  data_frequency: '1m' | '1d'
-  mode: VECTORIZED | EVENT_DRIVEN
-}"]
+    subgraph DataSources["Data Sources"]
+        CSV["CSV / Parquet\n(Yahoo, Alpaca, IBKR formats)"]
+        TSDB["TimescaleDB\nmarket_bars hypertable"]
     end
 
-    subgraph DataReplay["Historical Data Replay"]
-        LOAD["Load from Time-Series Store\nor CSV / Parquet"]
-        NORM["Normalize to BarData schema\n(IBKR-compatible structs)"]
-        REPLAY["Event Replay Engine\n(simulates real-time feed)"]
+    subgraph DataLoader["DataLoader (data_loader.py)"]
+        DL_CSV["from_csv() — flexible column map"]
+        DL_PQ["from_parquet() — date filtering"]
+        DL_TS["from_timescaledb() — asyncpg"]
+        OCB["OptionsChainBuilder\nweekly synthetic chains"]
     end
 
-    subgraph Execution2["Simulated Execution"]
-        STRAT_BT["Strategy Instance\n(same code as live!)"]
-        FILL_SIM["Fill Simulator\n(VWAP / next-bar / mid-price)"]
-        COMM["Commission Calculator"]
-        SLIP["Slippage Model"]
+    subgraph Engine["BacktestEngine (engine.py)"]
+        BPub["BacktestPublisher\nmonkey-patches nexus.strategy.base.publisher\nCaptures strategy.signal without Redis"]
+        REPLAY["Bar-by-bar replay loop\nbinary search for nearest options chain"]
+        POS["_BacktestPosition\nVWAP avg cost tracking"]
     end
 
-    subgraph Results["Performance Analytics"]
-        EQUITY["Equity Curve"]
-        METRICS["Metrics {
-  total_return, CAGR
-  Sharpe, Sortino, Calmar
-  Max Drawdown, Recovery Time
-  Win Rate, Profit Factor
-  Avg Trade Duration
-}"]
-        TRADES["Trade Log"]
-        REPORT["HTML / JSON Report"]
+    subgraph Pricer["OptionsChainBuilder + options_pricer.py"]
+        HV["HistoricalVolatility\nrolling HV · EWMA · IV Rank"]
+        IVS["IVSurface\nput skew · call skew · near-term bump"]
+        PCB["PricerChainBuilder\nfull OptionsChainSnapshot via bs_greeks()"]
     end
 
-    Config --> DataReplay
-    LOAD --> NORM
-    NORM --> REPLAY
-    REPLAY --> STRAT_BT
-    STRAT_BT --> FILL_SIM
-    FILL_SIM --> COMM
-    COMM --> SLIP
-    SLIP --> Results
-    Results --> EQUITY
-    Results --> METRICS
-    Results --> TRADES
-    Results --> REPORT
+    subgraph FillSim["FillSimulator (fill_simulator.py)"]
+        EQ_FILL["Equity: NEXT_BAR_OPEN | CLOSE | VWAP | MID"]
+        OPT_FILL["Options: mid-price per leg\nCombo: net premium accumulation"]
+        COMM["Commission: IBKR rate schedule"]
+    end
+
+    subgraph Analytics["analytics.py"]
+        METRICS["PerformanceMetrics\nSharpe · Sortino · Calmar\nMax Drawdown + Duration\nWin Rate · Profit Factor\nCommission Drag"]
+        EC["Equity Curve\n(datetime, portfolio_value)[]"]
+        TRADES["TradeRecord log"]
+    end
+
+    subgraph WFO["WalkForwardOptimizer (walk_forward.py)"]
+        WINDOWS["Rolling windows\ntrain_pct=0.70  step_pct=0.10"]
+        GRID["Parallel grid search\nasyncio.Semaphore(8)"]
+        STAB["Param stability\nCV per parameter across windows"]
+    end
+
+    CSV --> DL_CSV
+    TSDB --> DL_TS
+    DL_CSV --> REPLAY
+    DL_PQ --> REPLAY
+    DL_TS --> REPLAY
+    OCB --> Pricer
+    PCB --> REPLAY
+
+    BPub --> REPLAY
+    REPLAY --> POS
+    POS --> FillSim
+    FillSim --> Analytics
+
+    Analytics --> WFO
+    WINDOWS --> GRID
+    GRID --> STAB
 ```
+
+**Key design: `BacktestPublisher`** temporarily replaces `nexus.strategy.base.publisher` during
+a run, capturing signals without touching Redis. Restored in `finally` — strategy code is
+never aware it is being backtested.
 
 ---
 
@@ -701,12 +842,17 @@ flowchart TD
 |-------|-----------|-----------|
 | Broker Integration | `ib_insync` (Python) | Best async Python client for IBKR; uses asyncio natively |
 | API Backend | FastAPI (Python) | Async, auto-OpenAPI docs, WebSocket support |
-| Event Bus | Redis Streams | **Confirmed.** Kafka-compatible patterns without broker ops overhead; upgrade path to Kafka if scale demands |
+| Event Bus | Redis Streams | Kafka-compatible patterns without broker ops overhead; upgrade path to Kafka if scale demands |
 | Relational DB | MySQL 8.x | Orders, positions, strategy config, audit |
-| Time-Series DB | TimescaleDB (Postgres extension) | High-performance OHLCV/tick storage; SQL-compatible. **Confirmed primary time-series store.** |
+| Time-Series DB | TimescaleDB (Postgres extension) | High-performance OHLCV/tick storage; SQL-compatible |
 | Schema Management | Liquibase | Versioned, rollback-capable DB migrations |
-| Strategy Framework | Custom ABC + VectorBT / Zipline-reloaded | Backtesting; custom ABC for live |
-| ML/AI | PyTorch, scikit-learn, LangChain | Model training and LLM-based signal generation |
+| Strategy Framework | Custom ABC (event-driven) | Same code path for live, paper, and backtest |
+| Backtesting | Custom event-driven replay engine | `BacktestEngine` + `WalkForwardOptimizer` in `nexus/backtest/` |
+| Regime Detection | `hmmlearn` GaussianHMM + XGBoost | Unsupervised HMM labels history; XGBoost learns semi-supervised |
+| LLM Sentiment | Anthropic Claude (`claude-haiku-4-5`) | Structured JSON sentiment on news; keyword fallback if no API key |
+| ML/AI Stack | `scikit-learn`, `hmmlearn`, `xgboost`, `cvxpy` | Ensemble weighting, regime HMM, XGBoost classifier, portfolio optimisation |
+| Portfolio Optimisation | `scipy.optimize` (SLSQP) + custom Kelly/risk-parity | Three allocation methods; 50% max concentration cap |
+| Quant / Data | `pandas`, `numpy`, `scipy` | Feature engineering, analytics, Black-Scholes Greeks |
 | Scheduler | APScheduler | Cron-like scheduling within Python |
 | Dashboard | React + Recharts / Streamlit (prototype) | Real-time charts, order blotter, telemetry feed |
 | Container | Docker + Docker Compose | Local dev; K8s-ready for production |
@@ -734,28 +880,31 @@ flowchart TD
 gantt
     title Nexus Development Phases
     dateFormat  YYYY-MM
-    section Phase 1 - Foundation
-    DB Schema + Liquibase setup        :p1a, 2026-03, 2w
-    IBKR connection + data ingestion   :p1b, after p1a, 3w
-    Redis Streams event bus            :p1c, after p1a, 2w
-    Telemetry aggregator + basic UI    :p1d, after p1c, 2w
+    section Phase 1 - Foundation (DONE)
+    DB Schema + Liquibase setup        :done, p1a, 2026-01, 2w
+    IBKR connection + data ingestion   :done, p1b, after p1a, 3w
+    Redis Streams event bus            :done, p1c, after p1a, 2w
+    Telemetry aggregator + basic UI    :done, p1d, after p1c, 2w
 
-    section Phase 2 - Strategy Core
-    Strategy engine + ABC interface    :p2a, after p1d, 3w
-    OMS + paper trading engine         :p2b, after p2a, 3w
-    Risk manager                       :p2c, after p2b, 2w
+    section Phase 2 - Strategy Core (DONE)
+    Strategy engine + ABC interface    :done, p2a, after p1d, 3w
+    OMS + paper trading engine         :done, p2b, after p2a, 3w
+    Risk manager + Greeks monitor      :done, p2c, after p2b, 2w
 
-    section Phase 3 - Backtesting
-    Backtesting engine                 :p3a, after p2c, 3w
-    Performance analytics + reporting  :p3b, after p3a, 2w
+    section Phase 3 - Backtesting (DONE)
+    BacktestEngine + DataLoader        :done, p3a, after p2c, 2w
+    FillSimulator + OptionsChainPricer :done, p3b, after p3a, 2w
+    Analytics + WalkForward optimizer  :done, p3c, after p3b, 1w
 
-    section Phase 4 - AI/ML
-    Feature engineering pipeline       :p4a, after p3b, 3w
-    ML model training pipeline         :p4b, after p4a, 3w
-    LLM-based signal generation        :p4c, after p4b, 4w
+    section Phase 4 - AI/ML Pipeline (DONE)
+    FeatureStore + IVEngine            :done, p4a, after p3c, 2w
+    RegimeDetector (HMM + XGBoost)     :done, p4b, after p4a, 2w
+    SentimentAnalyzer (Claude LLM)     :done, p4c, after p4b, 1w
+    StrategySelector + SignalEnsemble  :done, p4d, after p4c, 2w
+    PortfolioOptimizer + ModelTrainer  :done, p4e, after p4d, 1w
 
     section Phase 5 - Production
-    Security hardening + Vault         :p5a, after p4c, 2w
+    Security hardening + Vault         :p5a, after p4e, 2w
     Live trading activation (guarded)  :p5b, after p5a, 3w
     Production deployment (Docker/K8s) :p5c, after p5b, 2w
 ```
@@ -767,51 +916,72 @@ gantt
 ```
 nexus/
 ├── db/
-│   ├── changelogs/           # Liquibase changesets
-│   │   ├── 001-initial.xml
-│   │   └── ...
-│   └── liquibase.properties
+│   ├── changelogs/                     # Liquibase changesets (7 changesets, Phase 1)
+│   │   ├── 001-symbols.xml
+│   │   ├── 002-credentials.xml
+│   │   ├── 003-strategy.xml
+│   │   ├── 004-session.xml
+│   │   ├── 005-orders.xml
+│   │   ├── 006-backtest.xml
+│   │   └── 007-telemetry.xml
+│   └── timescaledb/
+│       └── init.sql                    # market_bars + market_ticks hypertables
 ├── nexus/
-│   ├── ingestion/            # Data ingestion services
-│   │   ├── ibkr_connector.py
-│   │   ├── news_ingester.py
-│   │   └── historical_puller.py
-│   ├── strategy/             # Strategy engine + ABC
-│   │   ├── base.py           # Strategy ABC
-│   │   ├── registry.py
-│   │   └── strategies/       # Concrete strategy implementations
-│   ├── ai/                   # ML/AI engine
-│   │   ├── features.py
-│   │   ├── model_registry.py
-│   │   └── models/
-│   ├── oms/                  # Order management
-│   │   ├── order_manager.py
-│   │   ├── paper_engine.py
-│   │   └── risk_manager.py
-│   ├── backtest/             # Backtesting engine
-│   │   ├── engine.py
-│   │   └── analytics.py
-│   ├── bus/                  # Event bus
-│   │   ├── publisher.py
-│   │   └── consumer.py
-│   ├── telemetry/            # Telemetry aggregation
-│   │   └── aggregator.py
-│   ├── api/                  # FastAPI routes
-│   │   ├── main.py
-│   │   ├── auth.py
-│   │   └── routes/
-│   └── core/                 # Shared schemas, config, utils
-│       ├── schemas.py        # Pydantic models (BarData, Signal, TelemetryEvent...)
-│       ├── config.py
-│       └── security.py
-├── ui/                       # React dashboard
+│   ├── core/
+│   │   ├── config.py                   # pydantic-settings; TradingMode enum; NEXUS_KILL_SWITCH
+│   │   └── schemas.py                  # BarData, Signal, OptionsContract, PortfolioGreeks, ...
+│   ├── bus/
+│   │   ├── publisher.py                # EventPublisher (Redis XADD); module singleton
+│   │   └── consumer.py                 # EventConsumer (XREAD + XREADGROUP + XACK)
+│   ├── ingestion/
+│   │   └── ibkr_connector.py           # IBKRConnector; watchdog; tick/bar/historical
+│   ├── telemetry/
+│   │   └── aggregator.py               # TelemetryAggregator; WebSocket fan-out; ring buffer
+│   ├── strategy/
+│   │   ├── base.py                     # BaseStrategy ABC; hot-reload params
+│   │   ├── registry.py                 # StrategyRegistry; strategy.activation consumer
+│   │   └── strategies/
+│   │       ├── ma_crossover.py         # MA Crossover equity strategy
+│   │       └── iron_condor.py          # Iron Condor options strategy
+│   ├── risk/
+│   │   ├── greeks.py                   # Black-Scholes Greeks; GreeksMonitor
+│   │   ├── limits.py                   # LimitsChecker; configurable position/Greeks/drawdown limits
+│   │   └── manager.py                  # RiskManager; kill switch → drawdown → Greeks → size
+│   ├── oms/
+│   │   ├── sizer.py                    # PositionSizer: fixed_pct | kelly | atr | confidence
+│   │   ├── order_builder.py            # OrderBuilder: single/multi-leg; bracket; IBKR BAG combos
+│   │   ├── paper_engine.py             # PaperEngine; PositionBook (VWAP); IBKR commission model
+│   │   └── router.py                   # SignalRouter; source_channel (strategy.signal|ai.signal); sentiment mod
+│   ├── backtest/
+│   │   ├── __init__.py                 # Public API
+│   │   ├── engine.py                   # BacktestEngine; BacktestPublisher; BacktestConfig/Result
+│   │   ├── data_loader.py              # DataLoader (CSV/Parquet/TimescaleDB); OptionsChainBuilder
+│   │   ├── options_pricer.py           # HistoricalVolatility; IVSurface; PricerChainBuilder
+│   │   ├── fill_simulator.py           # FillSimulator; FillMethod enum; IBKR commission model
+│   │   ├── analytics.py                # PerformanceMetrics; compute_metrics(); rolling_sharpe()
+│   │   └── walk_forward.py             # WalkForwardOptimizer; async grid search; param stability
+│   └── ai/
+│       ├── __init__.py                 # Public API; channel map
+│       ├── features.py                 # FeatureStore; pure Python ring buffers; → ai.features
+│       ├── iv_engine.py                # IVEngine; IVR · IVP · term slope · skew; → ai.iv_rank
+│       ├── regime.py                   # RegimeDetector; rule-based + HMM + XGBoost; → ai.regime
+│       ├── sentiment.py                # SentimentAnalyzer; Claude LLM + keyword fallback; → ai.sentiment
+│       ├── strategy_selector.py        # StrategySelector; Regime × IVR matrix; → strategy.activation
+│       ├── signal_ensemble.py          # SignalEnsemble; Sharpe-weighted votes; → ai.signal
+│       ├── portfolio_optimizer.py      # PortfolioOptimizer; Kelly|MV|risk-parity; → ai.allocation
+│       ├── trainer.py                  # ModelTrainer; HMM + XGBoost; run_in_executor
+│       └── models/                     # Trained model artifacts (regime_hmm.pkl, regime_xgb.pkl)
 ├── tests/
-├── docker-compose.yml
-├── pyproject.toml
+├── docker-compose.yml                  # MySQL 8 · TimescaleDB · Redis 7
+├── pyproject.toml                      # Python 3.11+; [ml] extras: anthropic, hmmlearn, xgboost, cvxpy
 └── README.md
 ```
 
 ---
 
-> **Next Step:** Begin with Phase 1 — Liquibase schema setup + IBKR connection manager.
+> **Next Step:** Phase 5 — Production hardening.
+> Key tasks: Vault secret injection, FastAPI auth routes (JWT/RBAC), live-trading activation gate,
+> Docker Compose production profiles, monitoring/alerting, and end-to-end integration tests.
+>
 > Run `docker-compose up` to start MySQL, Redis, and TimescaleDB locally.
+> Install ML extras: `pip install -e "nexus/[ml,dev]"`

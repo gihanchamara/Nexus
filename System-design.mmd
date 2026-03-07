@@ -3,7 +3,7 @@ flowchart TB
 
     %% ═══════════════════════════════════════════════════════════════════════
     %% NEXUS — AI-FIRST QUANT TRADING PLATFORM
-    %% High-Level Component Design  |  v0.2  |  Options-aware
+    %% High-Level Component Design  |  v0.4  |  Options-aware · Phases 1–4 complete
     %% ═══════════════════════════════════════════════════════════════════════
 
     %% ── EXTERNAL DATA SOURCES ───────────────────────────────────────────────
@@ -79,8 +79,16 @@ flowchart TB
         market.news | market.halt"]
 
         BUS_SIG["strategy.signal
+        strategy.activation
         strategy.state
         strategy.param_update"]
+
+        BUS_AI["ai.features
+        ai.regime
+        ai.iv_rank
+        ai.sentiment
+        ai.signal
+        ai.allocation"]
 
         BUS_ORD["order.submitted
         order.filled
@@ -97,13 +105,14 @@ flowchart TB
     subgraph AI["🤖  AI / Analytics Engine  ·  Platform differentiator — AI drives strategy selection, not just signals"]
 
         subgraph AI_MARKET["Market Intelligence"]
-            REGIME["Market Regime Detector
+            REGIME["Market Regime Detector (regime.py)
             ──────────────────────
-            Outputs: BULL | BEAR | SIDEWAYS | HIGH_VOL | CRISIS
-            Method: HMM · Gaussian Mixture · XGBoost classifier
-            Features: returns, vol, breadth, VIX term structure
-            Updates: every bar | Confidence: 0–1
-            ⚡ Drives: which strategy family to activate"]
+            States: BULL_TREND|BEAR_TREND|SIDEWAYS_CHOP|HIGH_VOL|CRISIS
+            Tier 1: Rule-based (always active; confidence 0.60)
+            Tier 2: GaussianHMM via hmmlearn (loaded from disk)
+            Tier 3: XGBoost companion classifier (semi-supervised)
+            Graceful fallback if hmmlearn/model absent
+            Publishes → ai.regime"]
 
             IV_SURF["IV Surface Modeler
             ──────────────────────
@@ -136,57 +145,53 @@ flowchart TB
         end
 
         subgraph AI_SIG["Signal Generation"]
-            SENT["Sentiment Analyzer  (LLM-based)
+            SENT["Sentiment Analyzer (sentiment.py)
             ──────────────────────
-            LLM (Claude API) on news headline + body
-            Outputs: score -1.0 (bearish) → +1.0 (bullish)
-            Earnings call tone · CEO commentary
-            Macro policy tone · Analyst upgrade/downgrade
-            Symbol-level + macro-level scores"]
+            Claude claude-haiku-4-5 (NEXUS_ANTHROPIC_API_KEY)
+            Structured JSON output: score · confidence · catalyst
+            Keyword fallback if API key absent
+            Rate-limited: 1 call/symbol/minute
+            confidence_multiplier() → 0.5–1.5 applied in OMS
+            Publishes → ai.sentiment"]
 
-            FEAT["Feature Store
+            FEAT["Feature Store (features.py)
             ──────────────────────
-            Technical: RSI · MACD · BB · ATR · MFI · VWAP
-            Options:   IVR · IVP · skew · term slope · OI change
-            Macro:     yield curve · VIX · sector rotation score
-            Sentiment: news score · social score · flow score
-            All features: timestamped + versioned
-            Computed async, cached in Redis"]
+            Pure Python ring buffers (no pandas in hot path)
+            RSI (Wilder) · MACD (EMA12-26) · Bollinger %B
+            ATR (Wilder) · Rolling HV 20/60 · Momentum 5/20/60
+            Volume ratio · log returns
+            FeatureSnapshot.to_vector() → 11-element ML input
+            Publishes → ai.features"]
 
-            SIG_GEN["Signal Generator
+            SIG_ENS["Signal Ensemble (signal_ensemble.py)
             ──────────────────────
-            Ensemble: XGBoost + LSTM + linear model
-            Output: Signal { direction, confidence 0–1, symbol }
-            Per-symbol · Per-timeframe (1m, 1h, 1d)
-            Model versioned in Model Registry
-            ─────────────────────────────────
-            confidence > 0.7  →  full size position
-            confidence 0.5–0.7 →  half size
-            confidence < 0.5  →  no trade"]
+            Reads: strategy.signal (XREADGROUP consumer group)
+            Sharpe-weighted votes within 5-second window
+            Decisive threshold: dominant ≥ 55% of total weight
+            Conflict suppression (BUY + SELL → drop)
+            Publishes → ai.signal"]
         end
 
         subgraph AI_META["Meta-AI Layer  ·  AI decides WHAT to trade, not just direction"]
-            STRAT_SEL["Strategy Selector AI
+            STRAT_SEL["Strategy Selector AI (strategy_selector.py)
             ──────────────────────
-            Inputs:  Regime + IVR + Greeks exposure + P&L
-            Output:  { strategy_id, params, capital_pct }
-            ─────────────────────────────────────────────
-            Regime=SIDEWAYS + IVR>50  →  Iron Condor
-            Regime=BULL    + IVR<30   →  Bull Call Spread
-            Regime=BULL    + IVR>50   →  Covered Call
-            Regime=ANY     + catalyst →  Straddle (pre-event)
-            Regime=BEAR    + IVR<30   →  Long Put / Bear Spread
-            Regime=HIGH_VOL           →  reduce all positions
-            ─────────────────────────────────────────────
-            ⚡ This is the AI-first platform differentiator"]
+            Priority 1: CRISIS → deactivate ALL risk-on
+            Priority 2: Greeks guard (delta>400 or vega>4000)
+            Priority 3: Regime × IVR matrix:
+              SIDEWAYS + IVR≥50  →  Iron Condor / Strangle
+              BULL     + IVR≥50  →  Covered Call / CSP
+              BULL     + IVR<50  →  MA Crossover / Bull Spread
+              BEAR     + IVR≥50  →  Bear Spread / Protective Put
+              BEAR     + IVR<50  →  Long Put / Bear Spread
+              HIGH_VOL + IVR≥60  →  Iron Condor / Short Strangle
+            Publishes → strategy.activation"]
 
-            PORT_OPT["Portfolio Optimizer
+            PORT_OPT["Portfolio Optimizer (portfolio_optimizer.py)
             ──────────────────────
-            Multi-strategy capital allocation
-            Objective: Max Sharpe / Risk Parity / Min Greeks
-            Correlation-aware across equity + options legs
-            Target: configurable portfolio delta neutrality
-            Rebalances: on regime change or daily"]
+            Methods: half-Kelly · MV (scipy SLSQP) · risk-parity · equal
+            Max 50% concentration cap; floor 5%
+            risk-parity: w_i ∝ 1/σ_i (uncorrelated ERC)
+            Publishes → ai.allocation"]
         end
     end
 
@@ -588,15 +593,25 @@ flowchart TB
     REGIME   --> STRAT_SEL
     OPT_FLOW --> FEAT
     SENT     --> FEAT
-    FEAT     --> SIG_GEN
-    SIG_GEN  --> BUS_SIG
-    STRAT_SEL --> STRAT_REG
-    PORT_OPT --> PORT_MGR
+    FEAT     --> REGIME
+    BUS_SIG  --> SIG_ENS
+
+    %% AI → Bus
+    REGIME   --> BUS_AI
+    IV_RANK  --> BUS_AI
+    SENT     --> BUS_AI
+    FEAT     --> BUS_AI
+    SIG_ENS  --> BUS_AI
+    PORT_OPT --> BUS_AI
+
+    %% StrategySelector → strategy.activation
+    STRAT_SEL --> BUS_SIG
+    PORT_OPT  --> PORT_MGR
 
     %% AI → Persist
-    SIG_GEN  --> MODEL_STORE
+    PORT_OPT --> MODEL_STORE
 
-    %% Bus → Strategy
+    %% Bus → Strategy (activation + market data)
     BUS_MKT  --> STRAT_REG
     BUS_SIG  --> STRAT_REG
 
@@ -604,6 +619,9 @@ flowchart TB
     STRAT_REG --> BUS_SIG
     EXPIRY    --> BUS_SIG
     PORT_MGR  --> BUS_SIG
+
+    %% OMS can read ai.signal instead of strategy.signal (ensemble mode)
+    BUS_AI   --> SIG_ROUTE
 
     %% Bus → Risk
     BUS_SIG --> GREEKS_MON
@@ -670,8 +688,8 @@ flowchart TB
 
     class IBKR_GW,NEWS_API,ALT_DATA,MACRO_SRC ext
     class MKT_ING,OPT_ING,NEWS_ING,HIST ingest
-    class BUS_MKT,BUS_SIG,BUS_ORD,BUS_SYS bus
-    class REGIME,IV_SURF,IV_RANK,OPT_FLOW,SENT,FEAT,SIG_GEN,STRAT_SEL,PORT_OPT ai
+    class BUS_MKT,BUS_SIG,BUS_AI,BUS_ORD,BUS_SYS bus
+    class REGIME,IV_SURF,IV_RANK,OPT_FLOW,SENT,FEAT,SIG_ENS,STRAT_SEL,PORT_OPT ai
     class STRAT_REG,EQ1,EQ2,EQ3 strat
     class O_CC,O_CSP,O_WHL,O_IC,O_IBF strat
     class O_LC,O_VS,O_LEAPS strat
