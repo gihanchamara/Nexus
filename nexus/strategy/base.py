@@ -11,7 +11,7 @@ The platform calls:
 Strategies produce signals via emit_signal(), which publishes to the event bus.
 
 Displayable parameters:
-  Every strategy exposes self.params — a plain dict loaded from MySQL.
+  Every strategy exposes self.params — a plain dict loaded from PostgreSQL.
   The UI reads and edits these at runtime (hot-reload via update_params()).
   Strategies must document their params in the class docstring.
 """
@@ -116,7 +116,7 @@ class BaseStrategy(ABC):
 
     @property
     def params(self) -> dict[str, Any]:
-        """Current parameters as stored in MySQL. Displayed and editable in UI."""
+        """Current parameters as stored in PostgreSQL. Displayed and editable in UI."""
         return dict(self._params)
 
     # ─── State display ────────────────────────────────────────────────────────

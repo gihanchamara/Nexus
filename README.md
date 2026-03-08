@@ -1,7 +1,7 @@
 # Nexus — AI-First Quantitative Trading Platform
 
 > An event-driven, modular, AI-first quantitative trading platform built on IBKR data feeds,
-> with full backtesting, paper/live trading, real-time observability, and a MySQL persistence layer
+> with full backtesting, paper/live trading, real-time observability, and a PostgreSQL persistence layer
 > managed by Liquibase.
 >
 > **Status: Phases 1–4 complete.** Foundation → Strategy Core → Backtesting Engine → AI/ML Pipeline.
@@ -55,13 +55,13 @@ C4Context
     System_Ext(ibkr, "IBKR / TWS Gateway", "Primary broker. Provides live market data, historical data, order execution via ib_insync.")
     System_Ext(news, "Market News APIs", "Financial news feeds (e.g., Benzinga, Polygon, NewsAPI)")
     System_Ext(altdata, "Alternative Data", "Sentiment, macro, SEC filings, etc.")
-    System_Ext(mysql, "MySQL Database", "Relational persistence: orders, positions, strategy config, audit log")
+    System_Ext(postgres, "PostgreSQL Database", "Relational persistence: orders, positions, strategy config, audit log")
 
     Rel(trader, nexus, "Configures & monitors", "HTTPS / WebSocket")
     Rel(nexus, ibkr, "Market data & order routing", "ib_insync / TCP")
     Rel(nexus, news, "News ingestion", "REST / WebSocket")
     Rel(nexus, altdata, "Alt data feeds", "REST")
-    Rel(nexus, mysql, "Persist state", "SQL over TLS")
+    Rel(nexus, postgres, "Persist state", "SQL over TLS")
 ```
 
 ---
@@ -88,12 +88,12 @@ C4Container
         Container(risk, "Risk Manager", "Python", "Position limits, drawdown guards, VaR, kill switch.")
         Container(telemetry, "Telemetry Aggregator", "Python", "Subscribes to all event bus channels. Aggregates, persists, exposes via WebSocket.")
         Container(scheduler, "Scheduler / Cron", "APScheduler", "Triggers data pulls, model retraining, report generation.")
-        Container(dbmgr, "DB Migration Manager", "Liquibase", "Manages MySQL schema via versioned changesets.")
+        Container(dbmgr, "DB Migration Manager", "Liquibase", "Manages PostgreSQL schema via versioned changesets.")
     }
 
     System_Ext(ibkr, "IBKR TWS / Gateway")
     System_Ext(newsapi, "News APIs")
-    System_Ext(mysql, "MySQL DB")
+    System_Ext(postgres, "PostgreSQL DB")
     System_Ext(timeseries, "Time-Series Store (optional)", "TimescaleDB or InfluxDB for tick-level data")
 
     Rel(user, gateway, "REST / WS", "HTTPS")
@@ -120,14 +120,14 @@ C4Container
     Rel(backtest, bus, "Publish backtest results")
 
     Rel(telemetry, bus, "Subscribe all channels")
-    Rel(telemetry, mysql, "Persist telemetry")
+    Rel(telemetry, postgres, "Persist telemetry")
     Rel(telemetry, ui, "Push telemetry", "WebSocket")
 
-    Rel(dbmgr, mysql, "Schema migrations")
+    Rel(dbmgr, postgres, "Schema migrations")
     Rel(ingestion, timeseries, "Write ticks/bars")
     Rel(strategy, timeseries, "Read OHLCV / tick history")
-    Rel(strategy, mysql, "Read/write strategy config")
-    Rel(oms, mysql, "Persist orders, fills, positions")
+    Rel(strategy, postgres, "Read/write strategy config")
+    Rel(oms, postgres, "Persist orders, fills, positions")
     Rel(scheduler, bus, "Trigger events")
 ```
 
@@ -175,7 +175,7 @@ flowchart TD
 
     subgraph Persistence["Persistence"]
         TS["Time-Series Store\n(ticks, OHLCV bars)"]
-        MYSQL["MySQL\n(orders, positions,\nstrategy config, audit)"]
+        POSTGRES["PostgreSQL\n(orders, positions,\nstrategy config, audit)"]
     end
 
     subgraph Observability["Observability"]
@@ -843,7 +843,7 @@ flowchart TD
 | Broker Integration | `ib_insync` (Python) | Best async Python client for IBKR; uses asyncio natively |
 | API Backend | FastAPI (Python) | Async, auto-OpenAPI docs, WebSocket support |
 | Event Bus | Redis Streams | Kafka-compatible patterns without broker ops overhead; upgrade path to Kafka if scale demands |
-| Relational DB | MySQL 8.x | Orders, positions, strategy config, audit |
+| Relational DB | PostgreSQL 16 | Orders, positions, strategy config, audit |
 | Time-Series DB | TimescaleDB (Postgres extension) | High-performance OHLCV/tick storage; SQL-compatible |
 | Schema Management | Liquibase | Versioned, rollback-capable DB migrations |
 | Strategy Framework | Custom ABC (event-driven) | Same code path for live, paper, and backtest |
@@ -866,7 +866,7 @@ flowchart TD
 |---|-----------|-----------|
 | 1 | IBKR historical data rate limit (~60 req/10min) | Queue + throttle requests; pre-cache in time-series DB |
 | 2 | IBKR paper account: 100 market data line limit | Symbol watchlist management; prioritize active symbols |
-| 3 | MySQL is not ideal for tick-level time-series | Use TimescaleDB for OHLCV/tick data; MySQL for relational state |
+| 3 | PostgreSQL for time-series is suboptimal | Use TimescaleDB (pg extension) for OHLCV/tick data; plain PostgreSQL for relational state |
 | 4 | Single point of failure: Redis | Use Redis Sentinel or Cluster for production; acceptably simple for dev |
 | 5 | Live trading safety | PAPER mode default; LIVE requires admin + explicit token activation |
 | 6 | Model overfitting in backtest | Walk-forward validation, out-of-sample test sets mandatory |
@@ -972,7 +972,7 @@ nexus/
 │       ├── trainer.py                  # ModelTrainer; HMM + XGBoost; run_in_executor
 │       └── models/                     # Trained model artifacts (regime_hmm.pkl, regime_xgb.pkl)
 ├── tests/
-├── docker-compose.yml                  # MySQL 8 · TimescaleDB · Redis 7
+├── docker-compose.yml                  # PostgreSQL 16 · TimescaleDB (port 5433) · Redis 7
 ├── pyproject.toml                      # Python 3.11+; [ml] extras: anthropic, hmmlearn, xgboost, cvxpy
 └── README.md
 ```
@@ -983,5 +983,5 @@ nexus/
 > Key tasks: Vault secret injection, FastAPI auth routes (JWT/RBAC), live-trading activation gate,
 > Docker Compose production profiles, monitoring/alerting, and end-to-end integration tests.
 >
-> Run `docker-compose up` to start MySQL, Redis, and TimescaleDB locally.
+> Run `docker-compose up` to start PostgreSQL, Redis, and TimescaleDB locally.
 > Install ML extras: `pip install -e "nexus/[ml,dev]"`

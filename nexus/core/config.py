@@ -31,18 +31,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── MySQL ──────────────────────────────────────────────────────────────────
-    mysql_host: str = "localhost"
-    mysql_port: int = 3306
-    mysql_db: str = "nexus"
-    mysql_user: str = "nexus"
-    mysql_password: str = Field(..., description="MySQL password — required")
+    # ── PostgreSQL ─────────────────────────────────────────────────────────────
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "nexus"
+    postgres_user: str = "nexus"
+    postgres_password: str = Field(..., description="PostgreSQL password — required")
 
     @property
-    def mysql_url(self) -> str:
+    def postgres_url(self) -> str:
         return (
-            f"mysql+aiomysql://{self.mysql_user}:{self.mysql_password}"
-            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_db}"
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
     # ── TimescaleDB ────────────────────────────────────────────────────────────

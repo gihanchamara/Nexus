@@ -2,7 +2,7 @@
 Strategy Registry and Runner.
 
 Responsibilities:
-  1. Load all ACTIVE strategy configs from MySQL at startup
+  1. Load all ACTIVE strategy configs from PostgreSQL at startup
   2. Dynamically import the strategy class via class_path
   3. Instantiate strategies with their DB-stored parameters
   4. Subscribe strategy instances to the correct event bus channels
@@ -102,7 +102,7 @@ class StrategyRegistry:
           parameters : dict  — strategy parameters (matches DB column 'parameters')
           status     : str   — must be 'ACTIVE' to be loaded
 
-        This is called with data from the MySQL strategy table (via Liquibase schema).
+        This is called with data from the PostgreSQL strategy table (via Liquibase schema).
         """
         settings = get_settings()
         mode = TradingMode(settings.nexus_trading_mode)

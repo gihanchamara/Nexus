@@ -200,7 +200,7 @@ flowchart TB
 
         STRAT_REG["Strategy Registry
         ──────────────────────
-        All strategy configs stored in MySQL
+        All strategy configs stored in PostgreSQL
         Parameters: hot-reloadable at runtime
         Displayable: all params visible in UI
         Status: ACTIVE | PAUSED | ARCHIVED
@@ -497,7 +497,7 @@ flowchart TB
     %% ── PERSISTENCE ─────────────────────────────────────────────────────────
     subgraph PERSIST["💾  Persistence Layer"]
         direction LR
-        MYSQL_DB[("MySQL 8
+        MYSQL_DB[("PostgreSQL 16
         ─────────────
         Orders · Fills · Positions
         Strategy config + params
@@ -534,7 +534,7 @@ flowchart TB
         In-memory ring buffer: 200 events/component
         WebSocket fan-out → Dashboard (push only)
         Component health: last-seen + level tracking
-        Persists: WARN/ERROR events → MySQL"]
+        Persists: WARN/ERROR events → PostgreSQL"]
 
         DASH["Dashboard
         ──────────────────────

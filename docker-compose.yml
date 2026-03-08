@@ -3,22 +3,20 @@ version: "3.9"
 services:
 
   # ─── Relational DB (orders, positions, strategy config, audit) ──────────────
-  mysql:
-    image: mysql:8.0
-    container_name: nexus_mysql
+  postgres:
+    image: postgres:16-alpine
+    container_name: nexus_postgres
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: nexus
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "3306:3306"
+      - "5432:5432"
     volumes:
-      - mysql_data:/var/lib/mysql
-      - ./db/mysql/conf.d:/etc/mysql/conf.d:ro
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER}", "-p${MYSQL_PASSWORD}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -31,16 +29,16 @@ services:
     container_name: nexus_timescaledb
     restart: unless-stopped
     environment:
-      POSTGRES_DB: nexus_ts
+      POSTGRES_DB: ${TIMESCALE_DB}
       POSTGRES_USER: ${TIMESCALE_USER}
       POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
       - ./db/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${TIMESCALE_USER} -d nexus_ts"]
+      test: ["CMD-SHELL", "pg_isready -U ${TIMESCALE_USER} -d ${TIMESCALE_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -76,21 +74,21 @@ services:
     image: liquibase/liquibase:4.27
     container_name: nexus_liquibase
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
     volumes:
       - ./db/changelogs:/liquibase/changelog
     command: >
-      --url=jdbc:mysql://mysql:3306/nexus?useSSL=false&allowPublicKeyRetrieval=true
-      --username=${MYSQL_USER}
-      --password=${MYSQL_PASSWORD}
+      --url=jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      --username=${POSTGRES_USER}
+      --password=${POSTGRES_PASSWORD}
       --changeLogFile=db.changelog-master.xml
       update
     networks:
       - nexus_net
 
 volumes:
-  mysql_data:
+  postgres_data:
   timescale_data:
   redis_data:
 

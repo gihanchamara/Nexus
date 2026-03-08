@@ -18,7 +18,7 @@ Training data sources:
 
 Model storage:
   - Files: nexus/ai/models/  (regime_hmm.pkl, regime_xgb.pkl)
-  - DB: model_registry MySQL table (version, path, metrics — already in Phase 1 schema)
+  - DB: model_registry PostgreSQL table (version, path, metrics — already in Phase 1 schema)
 
 Anti-lookahead guarantee:
   Features are computed in strict forward-only order using FeatureStore.update().

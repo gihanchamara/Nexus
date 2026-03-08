@@ -4,7 +4,7 @@ Telemetry Aggregator.
 Subscribes to ALL telemetry.* channels on the Redis event bus.
 Provides:
   1. Async generator for WebSocket push to UI (real-time display)
-  2. Persistence of telemetry events to MySQL (sampled or full)
+  2. Persistence of telemetry events to PostgreSQL (sampled or full)
   3. In-memory circular buffer for recent events (last N per component)
 
 The UI is a passive consumer — it subscribes to the aggregator's WebSocket
@@ -83,7 +83,7 @@ class TelemetryAggregator:
         Continuously read from all telemetry channels and fan out to:
           - In-memory buffer
           - All registered WebSocket subscriber queues
-        Persistence to MySQL is done in a separate task to avoid blocking.
+        Persistence to PostgreSQL is done in a separate task to avoid blocking.
         """
         r = self._consumer._require_connection()
         # Build the streams dict: {channel: "$"} (start from latest)

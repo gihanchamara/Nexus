@@ -25,9 +25,8 @@ dependencies = [
 
     # Databases
     "sqlalchemy>=2.0.30",
-    "aiomysql>=0.2.0",
-    "asyncpg>=0.29.0",          # TimescaleDB async driver
-    "psycopg2-binary>=2.9.9",   # TimescaleDB sync driver (Liquibase compat)
+    "asyncpg>=0.29.0",          # PostgreSQL + TimescaleDB async driver
+    "psycopg2-binary>=2.9.9",   # PostgreSQL sync driver (Liquibase compat)
     "alembic>=1.13.0",          # optional ORM migrations complement
 
     # Auth & Security
